@@ -13,6 +13,7 @@ const DAYS=['Su','Mo','Tu','We','Th','Fr','Sa'];
 
 let S={
   user:null,userType:'client',
+  profiles:[],
   selDepartment:null,selDate:null,selSlot:null,
   calY:new Date().getFullYear(),calM:new Date().getMonth(),
   cancelId:null,
@@ -79,21 +80,7 @@ function switchAuthTab(t){
   document.getElementById('auth-reg-form').classList.toggle('hidden',t!=='register');
 }
 
-function doAdminLogin(){
-  if(document.getElementById('adm-pass').value!=='admin123'){toast('Incorrect password','error');return;}
-  S.user={name:'Clinic Admin',email:'admin@tidaltech.co.za'};
-  S.userType='admin';
-  closeModal('admin-login-modal');
-  document.getElementById('client-nav').classList.add('hidden');
-  document.getElementById('admin-nav').classList.remove('hidden');
-  document.getElementById('top-avatar').textContent='A';
-  document.getElementById('drawer-client').style.display='none';
-  document.getElementById('drawer-admin').style.display='block';
-  showScreen('app');
-  renderAdminHome();
-  showTab('admin-home');
-  toast('Welcome back, Melissa 👋','success');
-}
+// doAdminLogin() → handled by supabase.js (fetches data + starts real-time)
 function loginClient(user){
   S.user=user;S.userType='client';
   document.getElementById('client-nav').classList.remove('hidden');
@@ -279,35 +266,83 @@ function apptCardHTML(a,showActions){
     </div>
     <div class="appt-acts">
       <span class="chip ${isPast?'chip-gold':isCancelled?'chip-red':'chip-green'}">${isCancelled?'Cancelled':isPast?'Completed':'Confirmed'}</span>
-      ${showActions&&!isPast&&!isCancelled?`<button class="btn btn-warn btn-sm" onclick="openRescheduleCancel(${a.id})">Reschedule / Cancel</button>`:''}
+      ${showActions&&!isPast&&!isCancelled?`<button class="btn btn-warn btn-sm" onclick="openRescheduleCancel('${a.id}')">Reschedule / Cancel</button>`:''}
     </div>
   </div>`;
 }
 
 /* ════ RESCHEDULE / CANCEL ════ */
-function openRescheduleCancel(id){S.cancelId=id;openModal('reschedule-modal');}
-function doCancel(){
-  const appt=S.appointments.find(a=>a.id===S.cancelId);
+function openRescheduleCancel(id){
+  S.cancelId=id;
+  // Pre-fill current date in reschedule picker
+  const appt=S.appointments.find(a=>a.id===id);
   if(appt){
-    appt.status='cancelled';
-    closeModal('reschedule-modal');
-    showEmailPreview(appt,'cancel');
-    toast('Appointment cancelled. You and the department have been notified.','info');
-    renderMyAppointments();renderDashboard();
+    const dateEl=document.getElementById('rsch-date');
+    if(dateEl) dateEl.value=appt.date;
+    // Set min date to today
+    const today=dateStr(new Date());
+    if(dateEl) dateEl.min=today;
   }
+  openModal('reschedule-modal');
 }
-function doReschedule(){
+
+async function doCancel(){
+  const appt=S.appointments.find(a=>a.id===S.cancelId);
+  if(!appt) return;
+
+  // Update in Supabase
+  if(typeof _supa!=='undefined'){
+    const {error}=await _supa.from('bookings').update({status:'cancelled'}).eq('id',appt.id);
+    if(error){ toast('Could not cancel: '+error.message,'error'); return; }
+  }
+
+  appt.status='cancelled';
+  closeModal('reschedule-modal');
+
+  // Send email notification
+  if(typeof _sendBookingEmail==='function') await _sendBookingEmail(appt,'cancel');
+  else showEmailPreview(appt,'cancel');
+
+  toast('Appointment cancelled. A confirmation email has been sent.','info');
+  renderMyAppointments();
+  renderDashboard();
+}
+
+async function doReschedule(){
   const appt=S.appointments.find(a=>a.id===S.cancelId);
   const newDate=document.getElementById('rsch-date').value;
   const newSlot=document.getElementById('rsch-slot').value;
   if(!newDate||!newSlot){toast('Please select a new date and time','error');return;}
-  if(appt){
-    appt.date=newDate;appt.slot=newSlot;
-    closeModal('reschedule-modal');
-    showEmailPreview(appt,'reschedule');
-    toast('Appointment rescheduled ✓','success');
-    renderMyAppointments();renderDashboard();
+  if(!appt) return;
+
+  // Check slot not already taken
+  const taken=S.appointments.filter(a=>
+    a.departmentId===appt.departmentId &&
+    a.date===newDate &&
+    a.slot===newSlot &&
+    a.status!=='cancelled' &&
+    a.id!==appt.id
+  );
+  if(taken.length){toast('That time slot is already taken. Please choose another.','error');return;}
+
+  // Update in Supabase
+  if(typeof _supa!=='undefined'){
+    const {error}=await _supa.from('bookings').update({date:newDate,slot:newSlot,status:'confirmed'}).eq('id',appt.id);
+    if(error){ toast('Could not reschedule: '+error.message,'error'); return; }
   }
+
+  appt.date=newDate;
+  appt.slot=newSlot;
+  appt.status='confirmed';
+  closeModal('reschedule-modal');
+
+  // Send email notification
+  if(typeof _sendBookingEmail==='function') await _sendBookingEmail(appt,'reschedule');
+  else showEmailPreview(appt,'reschedule');
+
+  toast('Appointment rescheduled ✓ A confirmation email has been sent.','success');
+  renderMyAppointments();
+  renderDashboard();
 }
 
 /* ════ PROFILE ════ */
@@ -345,7 +380,7 @@ function renderAdminHome(){
   document.getElementById('adm-stat-today').textContent=todayAppts.length;
   document.getElementById('adm-stat-all').textContent=S.appointments.length;
   document.getElementById('adm-stat-cancel').textContent=todayCancel;
-  document.getElementById('adm-stat-clients').textContent=[...new Set(S.appointments.map(a=>a.email))].length;
+  document.getElementById('adm-stat-clients').textContent = S.profiles && S.profiles.length ? S.profiles.length : [...new Set(S.appointments.filter(a=>a.email).map(a=>a.email))].length;
   // Availability bar
   const bar=document.getElementById('avail-bar');
   bar.innerHTML=DOCTORS.map(d=>{
@@ -447,26 +482,57 @@ function renderAdminBookings(){
   }).join('')||'<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">No bookings found</td></tr>';
 }
 
-/* ════ ADMIN PATIENTS ════ */
+/* ════ ADMIN CLIENTS ════ */
 function renderAdminClients(){
-  const emails=[...new Set(S.appointments.map(a=>a.email))];
-  document.getElementById('adm-clients-body').innerHTML=emails.map(em=>{
-    const appts=S.appointments.filter(a=>a.email===em);
-    const a=appts[0];
-    const company=a.idNum||'—';
-    const sources=[...new Set(appts.map(x=>x.source))];
-    const srcBadges=sources.map(s=>s==='phone'
-      ?'<span class="chip chip-gold">&#128222; Phone</span>'
-      :'<span class="chip chip-navy">&#127760; Online</span>').join(' ');
-    return`<tr>
-      <td><strong>${a.name}</strong></td>
-      <td>${a.phone}</td>
-      <td>${a.email||'—'}</td>
-      <td>${company}</td>
+  // Merge registered profiles (from Supabase auth) with booking data
+  const profiles = S.profiles || [];
+  // Also collect any clients that appear only in bookings (e.g. phone bookings with no account)
+  const bookingEmails = [...new Set(S.appointments.filter(a=>a.email).map(a=>a.email))];
+  const profileEmails = profiles.map(p=>p.email);
+  // Emails in bookings but not in profiles (phone-in clients)
+  const extraEmails = bookingEmails.filter(em=>em && !profileEmails.includes(em));
+
+  let rows = '';
+
+  // Registered clients from profiles table
+  profiles.forEach(p=>{
+    const appts = S.appointments.filter(a=>a.email===p.email);
+    const sources = [...new Set(appts.map(x=>x.source))];
+    const srcBadges = appts.length
+      ? sources.map(s=>s==='phone'
+          ?'<span class="chip chip-gold">&#128222; Phone</span>'
+          :'<span class="chip chip-navy">&#127760; Online</span>').join(' ')
+      : '<span class="chip chip-navy">&#127760; Registered</span>';
+    rows += `<tr>
+      <td><strong>${p.full_name||p.email}</strong></td>
+      <td>${p.phone||'—'}</td>
+      <td>${p.email||'—'}</td>
+      <td>${p.company||'—'}</td>
       <td>${srcBadges}</td>
       <td>${appts.length}</td>
     </tr>`;
-  }).join('')||'<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">No clients yet</td></tr>';
+  });
+
+  // Phone-in clients not in profiles
+  extraEmails.forEach(em=>{
+    const appts = S.appointments.filter(a=>a.email===em);
+    const a = appts[0];
+    const sources = [...new Set(appts.map(x=>x.source))];
+    const srcBadges = sources.map(s=>s==='phone'
+      ?'<span class="chip chip-gold">&#128222; Phone</span>'
+      :'<span class="chip chip-navy">&#127760; Online</span>').join(' ');
+    rows += `<tr>
+      <td><strong>${a.name}</strong></td>
+      <td>${a.phone||'—'}</td>
+      <td>${em||'—'}</td>
+      <td>${a.company||'—'}</td>
+      <td>${srcBadges}</td>
+      <td>${appts.length}</td>
+    </tr>`;
+  });
+
+  document.getElementById('adm-clients-body').innerHTML =
+    rows || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">No clients yet</td></tr>';
 }
 
 // adminCancelAppt() → handled by supabase.js
@@ -513,12 +579,12 @@ function toast(msg,type='info'){
   t.innerHTML=`<span>${icon}</span> ${msg}`;
   document.getElementById('toasts').appendChild(t);
   setTimeout(()=>t.remove(),4800);
+}
 function togglePw(id,btn){
   const el=document.getElementById(id);
   const show=el.type==='password';
   el.type=show?'text':'password';
   btn.textContent=show?'\uD83D\uDE48':'\uD83D\uDC41';
-}
 }
 
 /* ════ JSON File ════ */
