@@ -1,0 +1,389 @@
+/* ═══════════════════════════════════════════════════════════════
+   supabase.js  —  Tidal Tech Solutions · Appointly
+   ═══════════════════════════════════════════════════════════════ */
+
+// ── 1. YOUR KEYS ────────────────────────────────────────────────
+const SUPABASE_URL      = 'https://gitptdhmojjoiednwglw.supabase.co';
+const SUPABASE_ANON     = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdpdHB0ZGhtb2pqb2llZG53Z2x3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNzQ1OTYsImV4cCI6MjA5Mjk1MDU5Nn0.PO-ODy7AkmtgWZYRi9NDJqcqoIuOJa6cjHPawUIuhSc';
+const RECAPTCHA_KEY     = 'YOUR_RECAPTCHA_V3_SITE_KEY';  // ← add when going live
+const SITE_URL          = window.location.origin + window.location.pathname;
+const VERIFY_CAPTCHA_FN = `${SUPABASE_URL}/functions/v1/verify-recaptcha`;
+const SEND_EMAIL_FN     = `${SUPABASE_URL}/functions/v1/send-email`;  // Resend edge function
+// ────────────────────────────────────────────────────────────────
+
+const _supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+
+/* ═══════════════════════════════════════════════════════════════
+   INACTIVITY TIMER — auto-logout after 30 minutes of no activity
+   ═══════════════════════════════════════════════════════════════ */
+const INACTIVITY_LIMIT = 30 * 60 * 1000;
+const WARNING_BEFORE   = 60 * 1000;
+let _inactivityTimer;
+let _warningTimer;
+
+function _resetInactivityTimer() {
+  if (!S.user) return;
+  clearTimeout(_inactivityTimer);
+  clearTimeout(_warningTimer);
+  _warningTimer = setTimeout(() => {
+    if (!S.user) return;
+    toast('⚠ You will be logged out in 1 minute due to inactivity.', 'warn');
+  }, INACTIVITY_LIMIT - WARNING_BEFORE);
+  _inactivityTimer = setTimeout(async () => {
+    if (!S.user) return;
+    toast('You have been logged out due to 30 minutes of inactivity.', 'warn');
+    await logout();
+  }, INACTIVITY_LIMIT);
+}
+
+function _startActivityListeners() {
+  ['mousemove','mousedown','keydown','touchstart','scroll','click'].forEach(evt => {
+    document.addEventListener(evt, _resetInactivityTimer, { passive: true });
+  });
+}
+
+function _stopActivityListeners() {
+  ['mousemove','mousedown','keydown','touchstart','scroll','click'].forEach(evt => {
+    document.removeEventListener(evt, _resetInactivityTimer);
+  });
+  clearTimeout(_inactivityTimer);
+  clearTimeout(_warningTimer);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   HELPER — upsert profile row (Google OAuth + email/password)
+   ═══════════════════════════════════════════════════════════════ */
+async function _upsertProfile(user, extra) {
+  extra = extra || {};
+  const profile = {
+    id         : user.id,
+    email      : user.email,
+    full_name  : user.user_metadata && user.user_metadata.full_name  ? user.user_metadata.full_name  : (extra.full_name  || user.email),
+    phone      : user.user_metadata && user.user_metadata.phone      ? user.user_metadata.phone      : (extra.phone      || ''),
+    company    : user.user_metadata && user.user_metadata.company    ? user.user_metadata.company    : (extra.company    || ''),
+    avatar_url : user.user_metadata && user.user_metadata.avatar_url ? user.user_metadata.avatar_url : (user.user_metadata && user.user_metadata.picture ? user.user_metadata.picture : ''),
+    provider   : user.app_metadata  && user.app_metadata.provider    ? user.app_metadata.provider    : 'email',
+    updated_at : new Date().toISOString(),
+  };
+  const { error } = await _supa.from('profiles').upsert(profile, { onConflict: 'id' });
+  if (error) console.error('Profile upsert error:', error.message);
+  return profile;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   AUTH STATE LISTENER
+   ═══════════════════════════════════════════════════════════════ */
+_supa.auth.onAuthStateChange(async function(event, session) {
+  if (event === 'SIGNED_IN' && session) {
+    const u = session.user;
+    const profile = await _upsertProfile(u);
+    await loadBookings();
+    loginClient({
+      name    : profile.full_name,
+      email   : profile.email,
+      phone   : profile.phone,
+      company : profile.company,
+    });
+    _startActivityListeners();
+    _resetInactivityTimer();
+    if (window.location.hash.indexOf('access_token') !== -1) {
+      history.replaceState(null, '', window.location.pathname);
+    }
+  }
+  if (event === 'SIGNED_OUT') {
+    _stopActivityListeners();
+    showScreen('landing');
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════
+   PAGE LOAD — restore existing session
+   ═══════════════════════════════════════════════════════════════ */
+window.addEventListener('load', async function() {
+  const result = await _supa.auth.getSession();
+  const session = result.data.session;
+  if (session) {
+    const u = session.user;
+    const profile = await _upsertProfile(u);
+    await loadBookings();
+    loginClient({
+      name    : profile.full_name,
+      email   : profile.email,
+      phone   : profile.phone,
+      company : profile.company,
+    });
+    _startActivityListeners();
+    _resetInactivityTimer();
+    if (window.location.hash.indexOf('access_token') !== -1) {
+      history.replaceState(null, '', window.location.pathname);
+    }
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════
+   reCAPTCHA HELPER
+   ═══════════════════════════════════════════════════════════════ */
+async function getRecaptchaToken(action) {
+  // Auto-bypass when key not yet configured
+  if (RECAPTCHA_KEY === 'YOUR_RECAPTCHA_V3_SITE_KEY' || typeof grecaptcha === 'undefined') {
+    return 'bypass';
+  }
+  return new Promise(function(resolve) {
+    grecaptcha.ready(async function() {
+      const token = await grecaptcha.execute(RECAPTCHA_KEY, { action: action });
+      resolve(token);
+    });
+  });
+}
+
+async function verifyRecaptcha(token) {
+  if (token === 'bypass') return true;
+  try {
+    const res = await fetch(VERIFY_CAPTCHA_FN, {
+      method  : 'POST',
+      headers : { 'Content-Type': 'application/json' },
+      body    : JSON.stringify({ token: token }),
+    });
+    const data = await res.json();
+    return data.success === true;
+  } catch(e) {
+    return false;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   REGISTER
+   ═══════════════════════════════════════════════════════════════ */
+async function doRegister() {
+  const first    = document.getElementById('rg-first').value.trim();
+  const last     = document.getElementById('rg-last').value.trim();
+  const email    = document.getElementById('rg-email').value.trim();
+  const phone    = document.getElementById('rg-phone').value.trim();
+  const company  = document.getElementById('rg-company').value.trim();
+  const password = document.getElementById('rg-pass').value;
+
+  if (!first || !email || !phone || !password) {
+    toast('Please fill in all required fields', 'error');
+    return;
+  }
+
+  const token     = await getRecaptchaToken('register');
+  const captchaOk = await verifyRecaptcha(token);
+  if (!captchaOk) { toast('Security check failed. Please try again.', 'error'); return; }
+
+  const result = await _supa.auth.signUp({
+    email    : email,
+    password : password,
+    options  : { data: { full_name: first + ' ' + last, phone: phone, company: company } },
+  });
+
+  if (result.error) { toast(result.error.message, 'error'); return; }
+
+  if (result.data.user) {
+    await _upsertProfile(result.data.user, { full_name: first + ' ' + last, phone: phone, company: company });
+  }
+
+  toast('Account created! Check your email to confirm ✓', 'success');
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SIGN IN (email + password)
+   ═══════════════════════════════════════════════════════════════ */
+async function doLogin() {
+  const email    = document.getElementById('li-email').value.trim();
+  const password = document.getElementById('li-pass').value;
+
+  if (!email || !password) { toast('Please enter your email and password', 'error'); return; }
+
+  const token     = await getRecaptchaToken('login');
+  const captchaOk = await verifyRecaptcha(token);
+  if (!captchaOk) { toast('Security check failed. Please try again.', 'error'); return; }
+
+  const result = await _supa.auth.signInWithPassword({ email: email, password: password });
+  if (result.error) { toast(result.error.message, 'error'); return; }
+  // onAuthStateChange handles profile upsert + loadBookings + loginClient
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   GOOGLE OAUTH
+   ═══════════════════════════════════════════════════════════════ */
+async function googleLogin() {
+  const result = await _supa.auth.signInWithOAuth({
+    provider : 'google',
+    options  : { redirectTo: SITE_URL },
+  });
+  if (result.error) toast(result.error.message, 'error');
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   FORGOT PASSWORD
+   ═══════════════════════════════════════════════════════════════ */
+async function doForgotPasswordSubmit() {
+  const email = document.getElementById('forgot-pw-email').value.trim();
+  if (!email) { toast('Please enter your email address', 'error'); return; }
+
+  const result = await _supa.auth.resetPasswordForEmail(email, {
+    redirectTo: SITE_URL + '?reset=true',
+  });
+
+  if (result.error) { toast(result.error.message, 'error'); return; }
+
+  document.getElementById('forgot-pw-sent-email').textContent = email;
+  document.getElementById('forgot-pw-form').classList.add('hidden');
+  document.getElementById('forgot-pw-sent').classList.remove('hidden');
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   LOGOUT
+   ═══════════════════════════════════════════════════════════════ */
+async function logout() {
+  _stopActivityListeners();
+  await _supa.auth.signOut();
+  S.user          = null;
+  S.selDepartment = null;
+  S.selDate       = null;
+  S.selSlot       = null;
+  showScreen('landing');
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SAVE BOOKING (client portal)
+   ═══════════════════════════════════════════════════════════════ */
+async function confirmBooking() {
+  if (!S.selDepartment) { toast('Please select a department', 'error'); return; }
+  if (!S.selDate)       { toast('Please select a date', 'error'); return; }
+  if (!S.selSlot)       { toast('Please select a time slot', 'error'); return; }
+
+  const name  = document.getElementById('bk-name').value.trim();
+  const phone = document.getElementById('bk-phone').value.trim();
+  if (!name || !phone) { toast('Please fill in your name and phone number', 'error'); return; }
+
+  const booking = {
+    department_id   : S.selDepartment.id,
+    department_name : S.selDepartment.name,
+    date            : S.selDate,
+    slot            : S.selSlot,
+    name            : name,
+    phone           : phone,
+    email           : S.user.email,
+    company         : document.getElementById('bk-id').value,
+    reason          : document.getElementById('bk-reason').value,
+    source          : 'online',
+    status          : 'confirmed',
+  };
+
+  const userResult = await _supa.auth.getUser();
+  if (userResult.data.user) booking.user_id = userResult.data.user.id;
+
+  const result = await _supa.from('bookings').insert(booking).select().single();
+  if (result.error) { toast('Booking failed: ' + result.error.message, 'error'); return; }
+
+  S.appointments.push(Object.assign({}, booking, { id: result.data.id }));
+
+  const emailOn = document.getElementById('notif-email').checked;
+  const waOn    = document.getElementById('notif-wa').checked;
+  const apptFull = Object.assign({}, booking, { departmentName: S.selDepartment.name });
+  if (emailOn) {
+    showEmailPreview(apptFull, 'booking');       // show preview in modal
+    await _sendBookingEmail(apptFull, 'booking'); // send real email via Resend
+  }
+  if (waOn) toast('💬 WhatsApp confirmation sent to ' + phone, 'info');
+  toast('Appointment confirmed! ✓', 'success');
+
+  S.selSlot = null;
+  renderSlots();
+  renderDashboard();
+  renderDepartments();
+  setTimeout(function() { showTab('my-appts'); }, 1600);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   LOAD BOOKINGS FROM SUPABASE
+   ═══════════════════════════════════════════════════════════════ */
+async function loadBookings() {
+  const result = await _supa.from('bookings').select('*');
+  if (result.error) { console.error('loadBookings:', result.error.message); return; }
+  if (!result.data || !result.data.length) return;
+  const dbAppts = result.data.map(function(b) {
+    return {
+      id             : b.id,
+      departmentId   : b.department_id,
+      departmentName : b.department_name,
+      date           : b.date,
+      slot           : b.slot,
+      name           : b.name,
+      phone          : b.phone,
+      email          : b.email,
+      company        : b.company || '',
+      reason         : b.reason || '',
+      source         : b.source || 'online',
+      status         : b.status || 'confirmed',
+    };
+  });
+  // Replace demo data with real DB data
+  S.appointments = dbAppts;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SAVE MANUAL BOOKING (admin portal)
+   ═══════════════════════════════════════════════════════════════ */
+async function doManualBooking() {
+  const name    = document.getElementById('mb-name').value.trim();
+  const phone   = document.getElementById('mb-phone').value.trim();
+  const docId   = parseInt(document.getElementById('mb-member').value);
+  const dateVal = document.getElementById('mb-date').value;
+  const slot    = document.getElementById('mb-slot').value;
+
+  if (!name || !phone || !docId || !dateVal) {
+    toast('Please fill in all required fields', 'error');
+    return;
+  }
+
+  const doc = DOCTORS.find(function(d) { return d.id === docId; });
+  const booking = {
+    department_id   : docId,
+    department_name : doc.name,
+    date            : dateVal,
+    slot            : slot,
+    name            : name,
+    phone           : phone,
+    email           : document.getElementById('mb-email').value,
+    company         : '',
+    reason          : document.getElementById('mb-reason').value,
+    source          : 'phone',
+    status          : 'confirmed',
+  };
+
+  const result = await _supa.from('bookings').insert(booking).select().single();
+  if (result.error) { toast('Booking failed: ' + result.error.message, 'error'); return; }
+
+  S.appointments.push(Object.assign({}, booking, { id: result.data.id, departmentId: docId, departmentName: doc.name }));
+  closeModal('manual-book-modal');
+  toast('Booking saved for ' + name + ' with ' + doc.name + ' on ' + fmtDate(dateVal) + ' at ' + slot + ' ✓', 'success');
+  renderAdminHome();
+  renderAdminBookings();
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   ADMIN CANCEL APPOINTMENT
+   ═══════════════════════════════════════════════════════════════ */
+async function adminCancelAppt(id) {
+  if (!confirm('Cancel this appointment? This cannot be undone.')) return;
+
+  const result = await _supa.from('bookings')
+    .update({ status: 'cancelled' })
+    .eq('id', id);
+
+  if (result.error) { toast('Cancel failed: ' + result.error.message, 'error'); return; }
+
+  const appt = S.appointments.find(function(a) { return a.id === id; });
+  if (appt) {
+    appt.status = 'cancelled';
+    await _sendBookingEmail(appt, 'cancel');
+  }
+
+  toast('Appointment for ' + (appt ? appt.name : '') + ' has been cancelled and client notified.', 'warn');
+  renderAdminHome();
+  renderAdminScheduleForDate();
+  renderAdminBookings();
+}
