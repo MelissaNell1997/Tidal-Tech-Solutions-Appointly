@@ -13,23 +13,12 @@ const DAYS=['Su','Mo','Tu','We','Th','Fr','Sa'];
 
 let S={
   user:null,userType:'client',
-  profiles:[],
   selDepartment:null,selDate:null,selSlot:null,
   calY:new Date().getFullYear(),calM:new Date().getMonth(),
   cancelId:null,
   adminScheduleDoc:1,
   adminScheduleDate:'',
-  appointments:[
-
-    {id:2,departmentId:2,departmentName:'Sales',date:'2026-04-29',slot:'14:00',
-     name:'Jane Doe',phone:'+27 82 111 2222',email:'jane@example.com',idNum:'9001010001088',
-     reason:'Product inquiry',maProvider:'',maPlan:'',maNum:'',
-     status:'confirmed',source:'online'},
-    {id:3,departmentId:1,departmentName:'Development Team',date:dateStr(new Date()),slot:'10:00',
-     name:'Sipho Dlamini',phone:'+27 73 555 1234',email:'sipho@mail.com',idNum:'8505050000000',
-     maPlan:'Standard',maNum:'789012',
-     status:'confirmed',source:'phone'},
-  ],
+  appointments:[], // populated from Supabase on login
 };
 
 /* ════ PWA ════ */
@@ -80,7 +69,21 @@ function switchAuthTab(t){
   document.getElementById('auth-reg-form').classList.toggle('hidden',t!=='register');
 }
 
-// doAdminLogin() → handled by supabase.js (fetches data + starts real-time)
+function doAdminLogin(){
+  if(document.getElementById('adm-pass').value!=='admin123'){toast('Incorrect password','error');return;}
+  S.user={name:'Clinic Admin',email:'admin@tidaltech.co.za'};
+  S.userType='admin';
+  closeModal('admin-login-modal');
+  document.getElementById('client-nav').classList.add('hidden');
+  document.getElementById('admin-nav').classList.remove('hidden');
+  document.getElementById('top-avatar').textContent='A';
+  document.getElementById('drawer-client').style.display='none';
+  document.getElementById('drawer-admin').style.display='block';
+  showScreen('app');
+  renderAdminHome();
+  showTab('admin-home');
+  toast('Welcome back, Melissa 👋','success');
+}
 function loginClient(user){
   S.user=user;S.userType='client';
   document.getElementById('client-nav').classList.remove('hidden');
@@ -275,7 +278,8 @@ function apptCardHTML(a,showActions){
 function openRescheduleCancel(id){
   S.cancelId=id;
   // Pre-fill current date in reschedule picker
-  const appt=S.appointments.find(a=>a.id===id);
+  // eslint-disable-next-line eqeqeq
+  const appt=S.appointments.find(a=>a.id==id);
   if(appt){
     const dateEl=document.getElementById('rsch-date');
     if(dateEl) dateEl.value=appt.date;
@@ -287,8 +291,9 @@ function openRescheduleCancel(id){
 }
 
 async function doCancel(){
-  const appt=S.appointments.find(a=>a.id===S.cancelId);
-  if(!appt) return;
+  // eslint-disable-next-line eqeqeq
+  const appt=S.appointments.find(a=>a.id==S.cancelId);
+  if(!appt){ toast('Appointment not found','error'); return; }
 
   // Update in Supabase
   if(typeof _supa!=='undefined'){
@@ -309,7 +314,8 @@ async function doCancel(){
 }
 
 async function doReschedule(){
-  const appt=S.appointments.find(a=>a.id===S.cancelId);
+  // eslint-disable-next-line eqeqeq
+  const appt=S.appointments.find(a=>a.id==S.cancelId);
   const newDate=document.getElementById('rsch-date').value;
   const newSlot=document.getElementById('rsch-slot').value;
   if(!newDate||!newSlot){toast('Please select a new date and time','error');return;}
@@ -380,7 +386,7 @@ function renderAdminHome(){
   document.getElementById('adm-stat-today').textContent=todayAppts.length;
   document.getElementById('adm-stat-all').textContent=S.appointments.length;
   document.getElementById('adm-stat-cancel').textContent=todayCancel;
-  document.getElementById('adm-stat-clients').textContent = S.profiles && S.profiles.length ? S.profiles.length : [...new Set(S.appointments.filter(a=>a.email).map(a=>a.email))].length;
+  document.getElementById('adm-stat-clients').textContent=[...new Set(S.appointments.map(a=>a.email))].length;
   // Availability bar
   const bar=document.getElementById('avail-bar');
   bar.innerHTML=DOCTORS.map(d=>{
@@ -482,57 +488,26 @@ function renderAdminBookings(){
   }).join('')||'<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">No bookings found</td></tr>';
 }
 
-/* ════ ADMIN CLIENTS ════ */
+/* ════ ADMIN PATIENTS ════ */
 function renderAdminClients(){
-  // Merge registered profiles (from Supabase auth) with booking data
-  const profiles = S.profiles || [];
-  // Also collect any clients that appear only in bookings (e.g. phone bookings with no account)
-  const bookingEmails = [...new Set(S.appointments.filter(a=>a.email).map(a=>a.email))];
-  const profileEmails = profiles.map(p=>p.email);
-  // Emails in bookings but not in profiles (phone-in clients)
-  const extraEmails = bookingEmails.filter(em=>em && !profileEmails.includes(em));
-
-  let rows = '';
-
-  // Registered clients from profiles table
-  profiles.forEach(p=>{
-    const appts = S.appointments.filter(a=>a.email===p.email);
-    const sources = [...new Set(appts.map(x=>x.source))];
-    const srcBadges = appts.length
-      ? sources.map(s=>s==='phone'
-          ?'<span class="chip chip-gold">&#128222; Phone</span>'
-          :'<span class="chip chip-navy">&#127760; Online</span>').join(' ')
-      : '<span class="chip chip-navy">&#127760; Registered</span>';
-    rows += `<tr>
-      <td><strong>${p.full_name||p.email}</strong></td>
-      <td>${p.phone||'—'}</td>
-      <td>${p.email||'—'}</td>
-      <td>${p.company||'—'}</td>
-      <td>${srcBadges}</td>
-      <td>${appts.length}</td>
-    </tr>`;
-  });
-
-  // Phone-in clients not in profiles
-  extraEmails.forEach(em=>{
-    const appts = S.appointments.filter(a=>a.email===em);
-    const a = appts[0];
-    const sources = [...new Set(appts.map(x=>x.source))];
-    const srcBadges = sources.map(s=>s==='phone'
+  const emails=[...new Set(S.appointments.map(a=>a.email))];
+  document.getElementById('adm-clients-body').innerHTML=emails.map(em=>{
+    const appts=S.appointments.filter(a=>a.email===em);
+    const a=appts[0];
+    const company=a.idNum||'—';
+    const sources=[...new Set(appts.map(x=>x.source))];
+    const srcBadges=sources.map(s=>s==='phone'
       ?'<span class="chip chip-gold">&#128222; Phone</span>'
       :'<span class="chip chip-navy">&#127760; Online</span>').join(' ');
-    rows += `<tr>
+    return`<tr>
       <td><strong>${a.name}</strong></td>
-      <td>${a.phone||'—'}</td>
-      <td>${em||'—'}</td>
-      <td>${a.company||'—'}</td>
+      <td>${a.phone}</td>
+      <td>${a.email||'—'}</td>
+      <td>${company}</td>
       <td>${srcBadges}</td>
       <td>${appts.length}</td>
     </tr>`;
-  });
-
-  document.getElementById('adm-clients-body').innerHTML =
-    rows || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">No clients yet</td></tr>';
+  }).join('')||'<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">No clients yet</td></tr>';
 }
 
 // adminCancelAppt() → handled by supabase.js
@@ -579,12 +554,12 @@ function toast(msg,type='info'){
   t.innerHTML=`<span>${icon}</span> ${msg}`;
   document.getElementById('toasts').appendChild(t);
   setTimeout(()=>t.remove(),4800);
-}
 function togglePw(id,btn){
   const el=document.getElementById(id);
   const show=el.type==='password';
   el.type=show?'text':'password';
   btn.textContent=show?'\uD83D\uDE48':'\uD83D\uDC41';
+}
 }
 
 /* ════ JSON File ════ */
