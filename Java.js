@@ -19,7 +19,7 @@ let S={
   profiles:[],
   adminScheduleDoc:1,
   adminScheduleDate:'',
-  appointments:[], // loaded from Supabase on login
+  appointments:[],  // loaded from Supabase
 };
 
 /* ════ PWA ════ */
@@ -71,10 +71,8 @@ function switchAuthTab(t){
 }
 
 async function doAdminLogin(){
-  const pass=document.getElementById('adm-pass').value;
-  if(pass!=='admin123'){toast('Incorrect password','error');return;}
-  toast('Loading portal data…','info');
-  // Fetch ALL bookings and profiles from Supabase before showing portal
+  if(document.getElementById('adm-pass').value!=='admin123'){toast('Incorrect password','error');return;}
+  toast('Loading portal…','info');
   await loadBookings();
   await loadProfiles();
   S.user={name:'Clinic Admin',email:'admin@tidaltech.co.za'};
@@ -88,7 +86,6 @@ async function doAdminLogin(){
   showScreen('app');
   renderAdminHome();
   showTab('admin-home');
-  // Start real-time so admin sees new bookings/clients live
   if(typeof _startRealtimeBookings==='function') _startRealtimeBookings();
   if(typeof _startRealtimeProfiles==='function') _startRealtimeProfiles();
   toast('Welcome back, Melissa 👋','success');
@@ -504,7 +501,8 @@ function renderAdminClients(){
     const appts=S.appointments.filter(a=>a.email===p.email);
     const sources=[...new Set(appts.map(x=>x.source))];
     const srcBadges=appts.length
-      ?sources.map(s=>s==='phone'?'<span class="chip chip-gold">&#128222; Phone</span>':'<span class="chip chip-navy">&#127760; Online</span>').join(' ')
+      ?sources.map(s=>s==='phone'?'<span class="chip chip-gold">&#128222; Phone</span>'
+:'<span class="chip chip-navy">&#127760; Online</span>').join(' ')
       :'<span class="chip chip-navy">&#127760; Registered</span>';
     rows+=`<tr><td><strong>${p.full_name||p.email}</strong></td><td>${p.phone||'—'}</td><td>${p.email||'—'}</td><td>${p.company||'—'}</td><td>${srcBadges}</td><td>${appts.length}</td></tr>`;
   });
@@ -512,7 +510,8 @@ function renderAdminClients(){
     const appts=S.appointments.filter(a=>a.email===em);
     const a=appts[0];
     const sources=[...new Set(appts.map(x=>x.source))];
-    const srcBadges=sources.map(s=>s==='phone'?'<span class="chip chip-gold">&#128222; Phone</span>':'<span class="chip chip-navy">&#127760; Online</span>').join(' ');
+    const srcBadges=sources.map(s=>s==='phone'?'<span class="chip chip-gold">&#128222; Phone</span>'
+:'<span class="chip chip-navy">&#127760; Online</span>').join(' ');
     rows+=`<tr><td><strong>${a.name}</strong></td><td>${a.phone||'—'}</td><td>${em||'—'}</td><td>${a.company||'—'}</td><td>${srcBadges}</td><td>${appts.length}</td></tr>`;
   });
   document.getElementById('adm-clients-body').innerHTML=rows||'<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">No clients yet</td></tr>';
@@ -570,4 +569,4 @@ function togglePw(id,btn){
   btn.textContent=show?'\uD83D\uDE48':'\uD83D\uDC41';
 }
 
-/* manifest.json fetch removed — no #display element in HTML */
+/* manifest fetch removed */
