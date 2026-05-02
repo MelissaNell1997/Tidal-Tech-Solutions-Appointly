@@ -4,7 +4,7 @@
 
 // ── 1. YOUR KEYS ────────────────────────────────────────────────
 const SUPABASE_URL      = 'https://gitptdhmojjoiednwglw.supabase.co';
-const SUPABASE_ANON     = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdpdHB0ZGhtb2pqb2llZG53Z2x3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNzQ1OTYsImV4cCI6MjA5Mjk1MDU5Nn0.PO-ODy7AkmtgWZYRi9NDJqcqoIuOJa6cjHPawUIuhSc';        // ← Supabase → Settings → API → anon public
+const SUPABASE_ANON     = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdpdHB0ZGhtb2pqb2llZG53Z2x3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNzQ1OTYsImV4cCI6MjA5Mjk1MDU5Nn0.PO-ODy7AkmtgWZYRi9NDJqcqoIuOJa6cjHPawUIuhSc';
 const RECAPTCHA_KEY     = '6Ldr89MsAAAAAL9tZBe3Zv6KXSldIeyTx42eM5LI';
 const SEND_EMAIL_FN     = `${SUPABASE_URL}/functions/v1/send-email`;
 const SITE_URL          = window.location.origin + window.location.pathname;
@@ -13,55 +13,53 @@ const VERIFY_CAPTCHA_FN = `${SUPABASE_URL}/functions/v1/verify-recaptcha`;
 
 const _supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
-
 /* ═══════════════════════════════════════════════════════════════
-   LOAD ALL CLIENT PROFILES FROM SUPABASE (admin use)
-   ═══════════════════════════════════════════════════════════════ */
-async function loadProfiles() {
-  const result = await _supa.from('profiles').select('*').order('full_name', { ascending: true });
-  if (result.error) { console.error('loadProfiles:', result.error.message); return; }
-  S.profiles = result.data || [];
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   REAL-TIME — bookings table (admin + client see updates live)
+   REAL-TIME SUBSCRIPTION — keeps admin portal live
    ═══════════════════════════════════════════════════════════════ */
 let _realtimeChannel = null;
+
 function _startRealtimeBookings() {
-  if (_realtimeChannel) return;
+  if (_realtimeChannel) return; // already subscribed
   _realtimeChannel = _supa
     .channel('public:bookings')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' },
       async function(payload) {
+        // Re-fetch all bookings to keep state consistent
         await loadBookings();
+        // Refresh whichever admin view is currently active
         if (S.userType === 'admin') {
           renderAdminHome();
           renderAdminScheduleForDate();
           renderAdminBookings();
           renderAdminClients();
-          if (payload.eventType === 'INSERT') {
-            const b = payload.new;
-            toast('🔔 New booking: ' + (b.name||'') + ' — ' + (b.department_name||'') + ' at ' + (b.slot||''), 'info');
-          }
         }
         if (S.userType === 'client') {
           renderDashboard();
           renderMyAppointments();
           renderSlots();
-          renderDepartments();
+        }
+        // Show a live indicator for the admin
+        if (S.userType === 'admin' && payload.eventType === 'INSERT') {
+          const b = payload.new;
+          toast('🔔 New booking: ' + (b.name || '') + ' — ' + (b.department_name || '') + ' at ' + (b.slot || ''), 'info');
         }
       }
     )
     .subscribe();
 }
+
 function _stopRealtimeBookings() {
-  if (_realtimeChannel) { _supa.removeChannel(_realtimeChannel); _realtimeChannel = null; }
+  if (_realtimeChannel) {
+    _supa.removeChannel(_realtimeChannel);
+    _realtimeChannel = null;
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   REAL-TIME — profiles table (clients tab updates live)
+   REAL-TIME SUBSCRIPTION — profiles (clients tab)
    ═══════════════════════════════════════════════════════════════ */
 let _realtimeProfilesChannel = null;
+
 function _startRealtimeProfiles() {
   if (_realtimeProfilesChannel) return;
   _realtimeProfilesChannel = _supa
@@ -69,14 +67,23 @@ function _startRealtimeProfiles() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' },
       async function() {
         await loadProfiles();
-        if (S.userType === 'admin') renderAdminClients();
+        if (S.userType === 'admin') {
+          renderAdminClients();
+          const el = document.getElementById('adm-stat-clients');
+          if (el) el.textContent = S.profiles ? S.profiles.length : 0;
+        }
       }
     )
     .subscribe();
 }
+
 function _stopRealtimeProfiles() {
-  if (_realtimeProfilesChannel) { _supa.removeChannel(_realtimeProfilesChannel); _realtimeProfilesChannel = null; }
+  if (_realtimeProfilesChannel) {
+    _supa.removeChannel(_realtimeProfilesChannel);
+    _realtimeProfilesChannel = null;
+  }
 }
+
 /* ═══════════════════════════════════════════════════════════════
    INACTIVITY TIMER — auto-logout after 30 minutes of no activity
    ═══════════════════════════════════════════════════════════════ */
@@ -157,6 +164,8 @@ _supa.auth.onAuthStateChange(async function(event, session) {
   }
   if (event === 'SIGNED_OUT') {
     _stopActivityListeners();
+    _stopRealtimeBookings();
+    _stopRealtimeProfiles();
     showScreen('landing');
   }
 });
@@ -307,10 +316,10 @@ async function logout() {
   _stopRealtimeProfiles();
   await _supa.auth.signOut();
   S.user          = null;
+  S.userType      = 'client';
   S.selDepartment = null;
   S.selDate       = null;
   S.selSlot       = null;
-  S.appointments  = [];
   S.profiles      = [];
   showScreen('landing');
 }
@@ -438,8 +447,6 @@ async function _sendBookingEmail(appt, type) {
   }
 }
 
-// RESEND_API_KEY: set via supabase CLI secrets — do not put here
-
 /* ═══════════════════════════════════════════════════════════════
    SAVE BOOKING (client portal)
    ═══════════════════════════════════════════════════════════════ */
@@ -491,10 +498,10 @@ async function confirmBooking() {
    LOAD BOOKINGS FROM SUPABASE
    ═══════════════════════════════════════════════════════════════ */
 async function loadBookings() {
-  const result = await _supa.from('bookings').select('*');
+  const result = await _supa.from('bookings').select('*').order('date', { ascending: false });
   if (result.error) { console.error('loadBookings:', result.error.message); return; }
-  if (!result.data || !result.data.length) return;
-  const dbAppts = result.data.map(function(b) {
+  if (!result.data || !result.data.length) { S.appointments = []; return; }
+  S.appointments = result.data.map(function(b) {
     return {
       id             : b.id,
       departmentId   : b.department_id,
@@ -508,10 +515,52 @@ async function loadBookings() {
       reason         : b.reason || '',
       source         : b.source || 'online',
       status         : b.status || 'confirmed',
+      user_id        : b.user_id || null,
     };
   });
-  // Replace demo data with real DB data
-  S.appointments = dbAppts;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   LOAD ALL CLIENT PROFILES FROM SUPABASE (admin use)
+   ═══════════════════════════════════════════════════════════════ */
+async function loadProfiles() {
+  const result = await _supa.from('profiles').select('*').order('full_name', { ascending: true });
+  if (result.error) { console.error('loadProfiles:', result.error.message); return; }
+  S.profiles = result.data || [];
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   ADMIN LOGIN — fetches all data from Supabase + starts real-time
+   ═══════════════════════════════════════════════════════════════ */
+async function doAdminLogin() {
+  const pass = document.getElementById('adm-pass').value;
+  if (pass !== 'admin123') { toast('Incorrect password', 'error'); return; }
+
+  // Show loading state
+  toast('Loading admin data...', 'info');
+
+  // Fetch all bookings AND all client profiles from Supabase
+  await loadBookings();
+  await loadProfiles();
+
+  S.user     = { name: 'Clinic Admin', email: 'admin@tidaltech.co.za' };
+  S.userType = 'admin';
+
+  closeModal('admin-login-modal');
+  document.getElementById('client-nav').classList.add('hidden');
+  document.getElementById('admin-nav').classList.remove('hidden');
+  document.getElementById('top-avatar').textContent = 'A';
+  document.getElementById('drawer-client').style.display = 'none';
+  document.getElementById('drawer-admin').style.display  = 'block';
+  showScreen('app');
+  renderAdminHome();
+  showTab('admin-home');
+
+  // Start live real-time subscriptions so admin sees new data instantly
+  _startRealtimeBookings();
+  _startRealtimeProfiles();
+
+  toast('Welcome back, Melissa 👋', 'success');
 }
 
 /* ═══════════════════════════════════════════════════════════════
