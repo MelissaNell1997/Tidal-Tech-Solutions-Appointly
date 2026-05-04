@@ -13,6 +13,14 @@ const VERIFY_CAPTCHA_FN = `${SUPABASE_URL}/functions/v1/verify-recaptcha`;
 
 const _supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
+// ── TEMPORARY DEBUG — remove after fixing ──
+(async () => {
+  console.log('🔌 Supabase client created:', _supa);
+  const { data, error } = await _supa.from('bookings').select('*');
+  console.log('📦 Bookings data:', data);
+  console.log('❌ Bookings error:', error);
+})();
+
 /* ═══════════════════════════════════════════════════════════════
    REAL-TIME SUBSCRIPTION — keeps admin portal live
    ═══════════════════════════════════════════════════════════════ */
