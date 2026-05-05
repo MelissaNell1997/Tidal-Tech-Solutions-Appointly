@@ -126,26 +126,30 @@ function toggleNotifOpt(type){
 /* ════ DASHBOARD ════ */
 function renderDashboard(){
   if(!S.user||S.userType!=='client')return;
-  const now=new Date();
+  const today=new Date();today.setHours(0,0,0,0);
   const mine=S.appointments.filter(a=>a.email===S.user.email);
-  const upcoming=mine.filter(a=>{
-    const dt=new Date(`${a.date}T${a.slot}:00`);
-    return dt>=now && a.status!=='cancelled';
-  });
-  const past=mine.filter(a=>{
-    const dt=new Date(`${a.date}T${a.slot}:00`);
-    return dt<now && a.status!=='cancelled';
-  });
-  const cancelled=mine.filter(a=>a.status==='cancelled');
+  // Sort all by date ascending (earliest first)
+  const mineAsc=[...mine].sort((a,b)=>a.date.localeCompare(b.date));
+  const upcoming=mineAsc.filter(a=>new Date(a.date+'T00:00:00')>=today&&a.status!=='cancelled');
+  const cancelled=mineAsc.filter(a=>a.status==='cancelled');
+  const past=mineAsc.filter(a=>new Date(a.date+'T00:00:00')<today&&a.status!=='cancelled');
   document.getElementById('dash-name').textContent=S.user.name.split(' ')[0];
   document.getElementById('stat-up').textContent=upcoming.length;
   document.getElementById('stat-past').textContent=past.length;
   document.getElementById('stat-docs').textContent=[...new Set(mine.map(a=>a.departmentId))].length;
   const cont=document.getElementById('dash-appt-list');
-  const list=[...upcoming,...cancelled]
-    .sort((a,b)=> a.date===b.date ? a.slot.localeCompare(b.slot) : a.date.localeCompare(b.date));
-  if(!list.length){cont.innerHTML=`<div class="empty-state"><div class="esi">📅</div><p>No upcoming appointments. <a style="color:var(--teal);cursor:pointer" onclick="showTab('book')">Book now →</a></p></div>`;return;}
-  cont.innerHTML=list.slice(0,3).map(a=>apptCardHTML(a,false)).join('');
+  let html='';
+  if(upcoming.length){
+    html+=upcoming.slice(0,3).map(a=>apptCardHTML(a,false)).join('');
+  }
+  // Show recent cancellations on dashboard
+  const recentCancels=cancelled.slice(-2).reverse();
+  if(recentCancels.length){
+    html+=`<div style="margin-top:14px;font-size:.8rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;padding:4px 2px">Recent Cancellations</div>`;
+    html+=recentCancels.map(a=>apptCardHTML(a,false)).join('');
+  }
+  if(!html){cont.innerHTML=`<div class="empty-state"><div class="esi">📅</div><p>No upcoming appointments. <a style="color:var(--teal);cursor:pointer" onclick="showTab('book')">Book now →</a></p></div>`;return;}
+  cont.innerHTML=html;
 }
 
 /* ════ DOCTORS ════ */
@@ -192,18 +196,6 @@ function changeMonth(dir){
 }
 function selectDate(ds){S.selDate=ds;renderCalendar();renderSlots();}
 
-function parseSlotDate(dateStr, slot){
-  const [y,m,d]=dateStr.split('-').map(n=>parseInt(n,10));
-  const [h,min]=slot.split(':').map(n=>parseInt(n,10));
-  return new Date(y,m-1,d,h,min,0,0);
-}
-function isSlotExpired(dateStr, slot){
-  if(!dateStr||!slot) return false;
-  const now=new Date();
-  const slotDate=parseSlotDate(dateStr, slot);
-  return slotDate <= now;
-}
-
 /* ════ SLOTS ════ */
 function renderSlots(){
   const hint=document.getElementById('slot-hint');
@@ -211,21 +203,23 @@ function renderSlots(){
   if(!S.selDepartment||!S.selDate){hint.textContent='Select a department and date first.';grid.innerHTML='';updateBookSummary();return;}
   hint.textContent=`${S.selDepartment.name} — ${fmtDate(S.selDate)}`;
   const taken=S.appointments.filter(a=>a.departmentId===S.selDepartment.id&&a.date===S.selDate&&a.status!=='cancelled').map(a=>a.slot);
-  if(S.selSlot && isSlotExpired(S.selDate, S.selSlot)) S.selSlot=null;
+  // Grey out slots that have already passed today
+  const now=new Date();
+  const todayStr=dateStr(now);
+  const isToday=(S.selDate===todayStr);
+  const currentMins=now.getHours()*60+now.getMinutes();
   grid.innerHTML=SLOTS.map(t=>{
-    const isTaken=taken.includes(t);
-    const isExpired=isSlotExpired(S.selDate,t);
-    const isSel=t===S.selSlot;
-    const statusClass=isTaken ? 'taken' : isExpired ? 'expired' : isSel ? 'sel' : 'free';
-    const extraText=isTaken ? '<br><small>Booked</small>' : isExpired ? '<br><small>Passed</small>' : '';
-    return `<div class="slot-btn ${statusClass}" onclick="${isTaken||isExpired?'':(`selectSlot('${t}')`)}">${t}${extraText}</div>`;
+    const isTaken=taken.includes(t),isSel=t===S.selSlot;
+    let isPastTime=false;
+    if(isToday){const[h,m]=t.split(':').map(Number);if(h*60+m<=currentMins)isPastTime=true;}
+    const isDisabled=isTaken||isPastTime;
+    let cls=isDisabled?(isPastTime&&!isTaken?'past-time':'taken'):(isSel?'sel':'free');
+    return`<div class="slot-btn ${cls}" onclick="${isDisabled?'':(`selectSlot('${t}')`)}">` +
+           `${t}${isTaken?'<br><small>Booked</small>':isPastTime?'<br><small>Passed</small>':''}</div>`;
   }).join('');
   updateBookSummary();
 }
 function selectSlot(t){S.selSlot=t;renderSlots();}
-setInterval(() => {
-  if (S.selDepartment && S.selDate) renderSlots();
-}, 60000);
 function updateBookSummary(){
   const el=document.getElementById('book-summary');
   if(S.selDepartment&&S.selDate&&S.selSlot){
@@ -268,24 +262,25 @@ function showEmailPreview(appt,type){
 /* ════ MY APPOINTMENTS ════ */
 function renderMyAppointments(){
   const list=document.getElementById('my-appt-list');
-  const mine=S.appointments.filter(a=>a.email===S.user?.email)
-    .sort((a,b)=> a.date===b.date ? a.slot.localeCompare(b.slot) : a.date.localeCompare(b.date));
+  // Sort from 1st of month to last (ascending by date = earliest first)
+  const mine=S.appointments.filter(a=>a.email===S.user?.email).sort((a,b)=>a.date.localeCompare(b.date));
   if(!mine.length){list.innerHTML=`<div class="empty-state"><div class="esi">📋</div><p>No appointments yet. <a style="color:var(--teal);cursor:pointer" onclick="showTab('book')">Book one →</a></p></div>`;return;}
   list.innerHTML=mine.map(a=>apptCardHTML(a,true)).join('');
 }
 function apptCardHTML(a,showActions){
-  const d=new Date(`${a.date}T${a.slot}:00`);
+  const d=new Date(a.date+'T00:00:00');
   const today=new Date();today.setHours(0,0,0,0);
   const isPast=d<today,isCancelled=a.status==='cancelled';
-  const ma=a.maProvider?`${a.maProvider} · ${a.maPlan}`:'Self-pay';
-  return`<div class="appt-card ${isCancelled?'cancelled':isPast?'past':''}">
+  // Greyed-out styling: cancelled always grey, past also greyed
+  const cardClass=isCancelled?'cancelled':isPast?'past':'';
+  return`<div class="appt-card ${cardClass}">
     <div class="appt-date-box"><div class="aday">${d.getDate()}</div><div class="amon">${MONTHS[d.getMonth()].slice(0,3)}</div></div>
     <div class="appt-info">
-      <h4>${a.departmentName} &mdash; ${a.slot}</h4>
+      <h4>${a.departmentName} &mdash; ${a.slot}${isCancelled?' <span style="color:#e55;font-size:.8rem;font-weight:600">(Cancelled)</span>':''}</h4>
       <p>${a.reason||'General visit'} &nbsp;|&nbsp; ${a.phone}</p>
     </div>
     <div class="appt-acts">
-      <span class="chip ${isPast?'chip-gold':isCancelled?'chip-red':'chip-green'}">${isCancelled?'Cancelled':isPast?'Completed':'Confirmed'}</span>
+      <span class="chip ${isCancelled?'chip-red':isPast?'chip-gold':'chip-green'}">${isCancelled?'Cancelled':isPast?'Completed':'Confirmed'}</span>
       ${showActions&&!isPast&&!isCancelled?`<button class="btn btn-warn btn-sm" onclick="openRescheduleCancel('${a.id}')">Reschedule / Cancel</button>`:''}
     </div>
   </div>`;
@@ -406,11 +401,7 @@ function renderAdminHome(){
   bar.innerHTML=DOCTORS.map(d=>{
     const taken=S.appointments.filter(a=>a.departmentId===d.id&&a.date===today&&a.status!=='cancelled').map(a=>a.slot);
     const free=SLOTS.filter(s=>!taken.includes(s)).length;
-    const slotsHtml=SLOTS.slice(0,6).map(s=>{
-      const expired=isSlotExpired(today, s);
-      const cls=taken.includes(s) ? 'taken' : expired ? 'expired' : '';
-      return `<span class="avail-slot ${cls}">${s}</span>`;
-    }).join('')+'…';
+    const slotsHtml=SLOTS.slice(0,6).map(s=>`<span class="avail-slot ${taken.includes(s)?'taken':''}">${s}</span>`).join('')+'…';
     return`<div class="avail-card" onclick="showTab('admin-schedule')">
       <h4>${d.name}</h4>
       <p>${d.spec} &nbsp;·&nbsp; <strong>${free}/${SLOTS.length}</strong> slots free</p>
@@ -445,22 +436,35 @@ function selectAdminScheduleDoc(id){
 function renderAdminScheduleTable(dateVal,docId){
   const takenMap={};
   S.appointments.filter(a=>a.departmentId===docId&&a.date===dateVal).forEach(a=>takenMap[a.slot]=a);
+  const now=new Date();
+  const todayStr=dateStr(now);
+  const isToday=(dateVal===todayStr);
+  const isPastDate=dateVal<todayStr;
+  const currentMins=now.getHours()*60+now.getMinutes();
   let n=0;
   document.getElementById('adm-schedule-body').innerHTML=SLOTS.map(t=>{
     const a=takenMap[t];
+    // Check if this time slot has passed (for today) or date is past
+    let slotPast=isPastDate;
+    if(isToday&&!slotPast){const[h,m]=t.split(':').map(Number);if(h*60+m<=currentMins)slotPast=true;}
     if(a){
       n++;
       const company=a.company||'—';
+      const isCancelled=a.status==='cancelled';
+      const rowStyle=isCancelled?'opacity:.5;background:rgba(220,50,50,.06);'
+                    :slotPast?'opacity:.55;background:rgba(0,0,0,.1);':'';
       const srcBadge=a.source==='phone'
         ?'<span class="chip chip-gold">&#128222; Phone</span>'
         :'<span class="chip chip-navy">&#127760; Online</span>';
-      const statusBadge=a.status==='cancelled'
+      const statusBadge=isCancelled
         ?'<span class="chip chip-red">Cancelled</span>'
-        :'<span class="chip chip-green">Confirmed</span>';
-      const cancelBtn=a.status!=='cancelled'
+        :slotPast
+          ?'<span class="chip chip-gold">Completed</span>'
+          :'<span class="chip chip-green">Confirmed</span>';
+      const cancelBtn=!isCancelled&&!slotPast
         ?`<button class="btn btn-danger btn-sm" onclick="adminCancelAppt('${a.id}')">Cancel</button>`
         :'';
-      return`<tr>
+      return`<tr style="${rowStyle}">
         <td><span class="row-num">${n}</span></td>
         <td><strong>${t}</strong></td>
         <td>${a.name}</td>
@@ -471,7 +475,9 @@ function renderAdminScheduleTable(dateVal,docId){
         <td>${cancelBtn}</td>
       </tr>`;
     }
-    return`<tr><td></td><td>${t}</td><td colspan="6" style="color:var(--muted2);font-size:.78rem">— Available —</td></tr>`;
+    // Empty slot — grey out if past
+    const emptyStyle=slotPast?'opacity:.4;':'';
+    return`<tr style="${emptyStyle}"><td></td><td>${t}</td><td colspan="6" style="color:var(--muted2);font-size:.78rem">${slotPast?'— Passed —':'— Available —'}</td></tr>`;
   }).join('');
 }
 
@@ -479,24 +485,28 @@ function renderAdminScheduleTable(dateVal,docId){
 function renderAdminBookings(){
   const filterDate=document.getElementById('adm-book-date').value;
   let list=filterDate?S.appointments.filter(a=>a.date===filterDate):S.appointments;
-  list=[...list].sort((a,b)=>{
-    if(a.date!==b.date) return a.date.localeCompare(b.date);
-    return a.slot.localeCompare(b.slot);
-  });
-  const now=new Date();
+  // Sort ascending: 1st of month listed first, last of month last
+  list=[...list].sort((a,b)=>a.date.localeCompare(b.date)||a.slot.localeCompare(b.slot));
+  const todayStr=dateStr(new Date());
   document.getElementById('adm-bookings-body').innerHTML=list.map((a,i)=>{
     const company=a.company||'—';
+    const isPast=a.date<todayStr;
+    const isCancelled=a.status==='cancelled';
+    // Grey out row for past dates or cancelled
+    const rowStyle=isCancelled?'opacity:.5;background:rgba(220,50,50,.06);'
+                  :isPast?'opacity:.55;background:rgba(0,0,0,.12);':'';
     const srcBadge=a.source==='phone'
       ?'<span class="chip chip-gold">&#128222; Phone</span>'
       :'<span class="chip chip-navy">&#127760; Online</span>';
-    const statusBadge=a.status==='cancelled'
+    const statusBadge=isCancelled
       ?'<span class="chip chip-red">Cancelled</span>'
-      :'<span class="chip chip-green">Confirmed</span>';
-    const cancelBtn=a.status!=='cancelled'
+      :isPast
+        ?'<span class="chip chip-gold">Completed</span>'
+        :'<span class="chip chip-green">Confirmed</span>';
+    const cancelBtn=!isCancelled&&!isPast
       ?`<button class="btn btn-danger btn-sm" onclick="adminCancelAppt('${a.id}')">Cancel</button>`
       :'';
-    const rowClass = a.status==='cancelled' ? 'cancelled' : (new Date(`${a.date}T${a.slot}:00`) < now ? 'past' : '');
-    return`<tr class="${rowClass}">
+    return`<tr style="${rowStyle}">
       <td><span class="row-num">${i+1}</span></td>
       <td>${fmtDate(a.date)}</td>
       <td>${a.slot}</td>
