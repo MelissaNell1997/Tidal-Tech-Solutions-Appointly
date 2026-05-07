@@ -342,9 +342,7 @@
                 <label class="notif-opt sel" id="notif-email-opt">
                   <input type="checkbox" id="notif-email" checked onchange="toggleNotifOpt('email')"/> 📧 Email
                 </label>
-                <label class="notif-opt sel" id="notif-wa-opt">
-                  <input type="checkbox" id="notif-wa" checked onchange="toggleNotifOpt('wa')"/> <span class="whatsapp-icon">💬</span> WhatsApp
-                </label>
+                <input type="checkbox" id="notif-wa" style="display:none"/>
               </div>
             </div>
             <button class="btn btn-teal btn-full mt" onclick="confirmBooking()">✓ Confirm &amp; Book</button>
@@ -464,6 +462,11 @@
 <div id="toasts"></div>
 
 <!-- ══ LOADING OVERLAY ══ -->
+<div id="loading-overlay" style="display:none">
+  <div class="loading-box">
+    <div class="loading-spinner"></div>
+    <div class="loading-msg" id="loading-msg">Loading…</div>
+  </div>
 </div>
  
  
