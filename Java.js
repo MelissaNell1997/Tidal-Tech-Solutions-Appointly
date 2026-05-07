@@ -279,10 +279,10 @@ function apptCardHTML(a,showActions){
       <h4>${a.departmentName} &mdash; ${a.slot}${isCancelled?' <span style="color:#e55;font-size:.8rem;font-weight:600">(Cancelled)</span>':''}</h4>
       <p>${a.reason||'General visit'} &nbsp;|&nbsp; ${a.phone}</p>
     </div>
-    <div class="appt-acts">
+    <div class="appt-acts" style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;justify-content:center">
       <span class="chip ${isCancelled?'chip-red':isPast?'chip-gold':'chip-green'}">${isCancelled?'Cancelled':isPast?'Completed':'Confirmed'}</span>
-      ${showActions&&!isPast&&!isCancelled?`<button class="btn btn-warn btn-sm" onclick="openRescheduleCancel('${a.id}')">Reschedule / Cancel</button>`:''}
-      ${!isPast&&!isCancelled?`<a href="${buildGoogleCalendarUrl(a)}" target="_blank" rel="noopener" class="btn btn-sm" style="background:#4285F4;color:#fff;text-decoration:none;display:inline-block;margin-top:6px">📅 Add to Google Calendar</a>`:''}
+      ${showActions&&!isPast&&!isCancelled?`<button class="btn btn-warn btn-sm" style="width:100%;white-space:nowrap" onclick="openRescheduleCancel('${a.id}')">Reschedule / Cancel</button>`:''}
+      ${!isPast&&!isCancelled?`<a href="${buildGoogleCalendarUrl(a)}" target="_blank" rel="noopener" class="btn btn-sm" style="background:#4285F4;color:#fff;text-decoration:none;display:inline-block;width:100%;text-align:center;white-space:nowrap;box-sizing:border-box">📅 Add to Google Calendar</a>`:''}
     </div>
   </div>`;
 }
@@ -362,18 +362,36 @@ async function doReschedule(){
 }
 
 /* ════ PROFILE ════ */
-function saveProfile(){
+async function saveProfile(){
   const first=document.getElementById('pf-first').value.trim();
   const last=document.getElementById('pf-last').value.trim();
+  const phone=document.getElementById('pf-phone').value.trim();
+  const company=document.getElementById('pf-id').value.trim();
   if(!first){toast('First name required','error');return;}
-  S.user.name=first+' '+last;
-  S.user.email=document.getElementById('pf-email').value.trim();
-  S.user.phone=document.getElementById('pf-phone').value.trim();
-  document.getElementById('prof-name-disp').textContent=S.user.name;
+  const fullName=first+(last?' '+last:'');
+  // Update local state immediately
+  S.user.name=fullName;
+  S.user.phone=phone;
+  S.user.company=company;
+  document.getElementById('prof-name-disp').textContent=fullName;
   document.getElementById('prof-email-disp').textContent=S.user.email;
   document.getElementById('top-avatar').textContent=first.charAt(0).toUpperCase();
   document.getElementById('prof-pic-el').textContent=first.charAt(0).toUpperCase();
   document.getElementById('dash-name').textContent=first;
+  // Persist to Supabase profiles table
+  try{
+    const userResult=await _supa.auth.getUser();
+    if(userResult.data&&userResult.data.user){
+      const uid=userResult.data.user.id;
+      const {error}=await _supa.from('profiles').update({
+        full_name:fullName,
+        phone:phone,
+        company:company,
+        updated_at:new Date().toISOString(),
+      }).eq('id',uid);
+      if(error){console.error('Profile save error:',error.message);toast('Saved locally but could not sync to server','warn');return;}
+    }
+  }catch(e){console.error('Profile save exception:',e.message);}
   toast('Profile saved ✓','success');
 }
 function handlePicUpload(e){
