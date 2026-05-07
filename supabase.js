@@ -15,14 +15,10 @@ const _supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
 /* ── Loading overlay helpers ── */
 function showLoading(msg) {
-  const el = document.getElementById('loading-overlay');
-  const msgEl = document.getElementById('loading-msg');
-  if (el) { el.style.display = 'flex'; }
-  if (msgEl) msgEl.textContent = msg || 'Loading…';
+  // Loading overlay removed — causes app to get stuck
 }
 function hideLoading() {
-  const el = document.getElementById('loading-overlay');
-  if (el) el.style.display = 'none';
+  // Loading overlay removed — causes app to get stuck
 }
 
 
@@ -189,15 +185,6 @@ _supa.auth.onAuthStateChange(async function(event, session) {
     const u = session.user;
     // If admin is already logged in, don't override with client view
     if (S.userType === 'admin') return;
-    // If client is already logged in (e.g. returning from another app), just refresh data silently
-    if (S.user && S.userType === 'client') {
-      await loadBookings();
-      renderDashboard();
-      renderMyAppointments();
-      renderDepartments();
-      renderSlots();
-      return;
-    }
     showLoading('Loading your bookings…');
     const profile = await _upsertProfile(u);
     await loadBookings();
@@ -229,13 +216,18 @@ _supa.auth.onAuthStateChange(async function(event, session) {
    PAGE LOAD — restore existing session
    ═══════════════════════════════════════════════════════════════ */
 window.addEventListener('load', async function() {
-  showLoading('Starting up…');
-  const result = await _supa.auth.getSession();
-  const session = result.data.session;
-  if (!session) { hideLoading(); }
-  if (session) {
+  try {
+    const result = await Promise.race([
+      _supa.auth.getSession(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Session timeout')), 8000))
+    ]);
+    const session = result.data && result.data.session;
+    if (!session) {
+      showScreen('landing');
+      return;
+    }
     const u = session.user;
-    // Restore admin session if this is the admin email
+    // Restore admin session
     if (u.email === ADMIN_EMAIL) {
       await loadBookings();
       await loadProfiles();
@@ -256,6 +248,7 @@ window.addEventListener('load', async function() {
       _resetInactivityTimer();
       return;
     }
+    // Restore client session
     const profile = await _upsertProfile(u);
     await loadBookings();
     loginClient({
@@ -270,33 +263,20 @@ window.addEventListener('load', async function() {
     if (window.location.hash.indexOf('access_token') !== -1) {
       history.replaceState(null, '', window.location.pathname);
     }
+  } catch(e) {
+    console.error('App startup error:', e.message);
+    // Always fall back to landing screen — never get stuck
+    showScreen('landing');
   }
 });
 
-async function _refreshOnReturn() {
-  if (!S.user) return;
+window.addEventListener('focus', async function() {
   if (S.userType === 'admin') {
     await loadBookings();
     renderAdminHome();
     renderAdminScheduleForDate();
     renderAdminBookings();
     renderAdminClients();
-  } else if (S.userType === 'client') {
-    await loadBookings();
-    renderDashboard();
-    renderMyAppointments();
-    renderDepartments();
-    renderSlots();
-  }
-}
-
-// Fires when switching back on desktop
-window.addEventListener('focus', _refreshOnReturn);
-
-// Fires when switching back on mobile (more reliable than 'focus' on phones)
-document.addEventListener('visibilitychange', function() {
-  if (document.visibilityState === 'visible') {
-    _refreshOnReturn();
   }
 });
 
@@ -583,37 +563,38 @@ async function confirmBooking() {
    LOAD BOOKINGS FROM SUPABASE
    ═══════════════════════════════════════════════════════════════ */
 async function loadBookings() {
-  const result = await _supa.from('bookings').select('*').order('date', { ascending: false });
-  console.log('[loadBookings] Result:', result);
-  if (result.error) { 
-    console.error('loadBookings ERROR:', result.error.message, result.error.code, result.error.details);
-    toast('Could not load bookings: ' + result.error.message, 'error');
-    return;
+  try {
+    const result = await Promise.race([
+      _supa.from('bookings').select('*').order('date', { ascending: false }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000))
+    ]);
+    if (result.error) {
+      console.error('loadBookings ERROR:', result.error.message);
+      if (!S.appointments.length) S.appointments = [];
+      return;
+    }
+    if (!result.data || !result.data.length) { S.appointments = []; return; }
+    S.appointments = result.data.map(function(b) {
+      return {
+        id             : b.id,
+        departmentId   : b.department_id,
+        departmentName : b.department_name,
+        date           : b.date,
+        slot           : b.slot,
+        name           : b.name,
+        phone          : b.phone,
+        email          : b.email,
+        company        : b.company || '',
+        reason         : b.reason || '',
+        source         : b.source || 'online',
+        status         : b.status || 'confirmed',
+        user_id        : b.user_id || null,
+      };
+    });
+  } catch(e) {
+    console.error('loadBookings failed:', e.message);
+    if (!S.appointments.length) S.appointments = [];
   }
-  console.log('[loadBookings] Raw data:', result.data);
-  if (!result.data || !result.data.length) { 
-    console.log('[loadBookings] No data found, setting appointments to []');
-    S.appointments = []; 
-    return;
-  }
-  S.appointments = result.data.map(function(b) {
-    return {
-      id             : b.id,
-      departmentId   : b.department_id,
-      departmentName : b.department_name,
-      date           : b.date,
-      slot           : b.slot,
-      name           : b.name,
-      phone          : b.phone,
-      email          : b.email,
-      company        : b.company || '',
-      reason         : b.reason || '',
-      source         : b.source || 'online',
-      status         : b.status || 'confirmed',
-      user_id        : b.user_id || null,
-    };
-  });
-  console.log('[loadBookings] Mapped appointments:', S.appointments);
 }
 
 /* ═══════════════════════════════════════════════════════════════
