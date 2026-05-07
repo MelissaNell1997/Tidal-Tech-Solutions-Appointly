@@ -342,7 +342,9 @@
                 <label class="notif-opt sel" id="notif-email-opt">
                   <input type="checkbox" id="notif-email" checked onchange="toggleNotifOpt('email')"/> 📧 Email
                 </label>
-                <input type="checkbox" id="notif-wa" style="display:none"/>
+                <label class="notif-opt sel" id="notif-wa-opt">
+                  <input type="checkbox" id="notif-wa" checked onchange="toggleNotifOpt('wa')"/> <span class="whatsapp-icon">💬</span> WhatsApp
+                </label>
               </div>
             </div>
             <button class="btn btn-teal btn-full mt" onclick="confirmBooking()">✓ Confirm &amp; Book</button>
@@ -431,7 +433,8 @@
       <div class="admin-date-row">
         <label>Filter by Date</label>
         <input type="date" id="adm-book-date" onchange="renderAdminBookings()"/>
-        <button class="btn btn-outline btn-sm" onclick="document.getElementById('adm-book-date').value='';renderAdminBookings()">Show All</button>
+        <button class="btn btn-outline btn-sm" onclick="document.getElementById('adm-book-date').value='';renderAdminBookings()">Upcoming</button>
+        <button class="btn btn-outline btn-sm" onclick="showAllBookingsIncPast()">Show History</button>
       </div>
       <div class="card">
         <table class="data-table">
