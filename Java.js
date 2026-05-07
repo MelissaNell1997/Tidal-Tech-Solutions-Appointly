@@ -279,10 +279,10 @@ function apptCardHTML(a,showActions){
       <h4>${a.departmentName} &mdash; ${a.slot}${isCancelled?' <span style="color:#e55;font-size:.8rem;font-weight:600">(Cancelled)</span>':''}</h4>
       <p>${a.reason||'General visit'} &nbsp;|&nbsp; ${a.phone}</p>
     </div>
-    <div class="appt-acts" style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;justify-content:center">
+    <div class="appt-acts">
       <span class="chip ${isCancelled?'chip-red':isPast?'chip-gold':'chip-green'}">${isCancelled?'Cancelled':isPast?'Completed':'Confirmed'}</span>
-      ${showActions&&!isPast&&!isCancelled?`<button class="btn btn-warn btn-sm" style="width:100%;white-space:nowrap" onclick="openRescheduleCancel('${a.id}')">Reschedule / Cancel</button>`:''}
-      ${!isPast&&!isCancelled?`<a href="${buildGoogleCalendarUrl(a)}" target="_blank" rel="noopener" class="btn btn-sm" style="background:#4285F4;color:#fff;text-decoration:none;display:inline-block;width:100%;text-align:center;white-space:nowrap;box-sizing:border-box">📅 Add to Google Calendar</a>`:''}
+      ${showActions&&!isPast&&!isCancelled?`<button class="btn btn-warn btn-sm" onclick="openRescheduleCancel('${a.id}')">Reschedule / Cancel</button>`:''}
+      ${!isPast&&!isCancelled?`<a href="${buildGoogleCalendarUrl(a)}" target="_blank" rel="noopener" class="btn btn-sm" style="background:#4285F4;color:#fff;text-decoration:none;display:inline-block;margin-top:6px">📅 Add to Google Calendar</a>`:''}
     </div>
   </div>`;
 }
@@ -362,36 +362,18 @@ async function doReschedule(){
 }
 
 /* ════ PROFILE ════ */
-async function saveProfile(){
+function saveProfile(){
   const first=document.getElementById('pf-first').value.trim();
   const last=document.getElementById('pf-last').value.trim();
-  const phone=document.getElementById('pf-phone').value.trim();
-  const company=document.getElementById('pf-id').value.trim();
   if(!first){toast('First name required','error');return;}
-  const fullName=first+(last?' '+last:'');
-  // Update local state immediately
-  S.user.name=fullName;
-  S.user.phone=phone;
-  S.user.company=company;
-  document.getElementById('prof-name-disp').textContent=fullName;
+  S.user.name=first+' '+last;
+  S.user.email=document.getElementById('pf-email').value.trim();
+  S.user.phone=document.getElementById('pf-phone').value.trim();
+  document.getElementById('prof-name-disp').textContent=S.user.name;
   document.getElementById('prof-email-disp').textContent=S.user.email;
   document.getElementById('top-avatar').textContent=first.charAt(0).toUpperCase();
   document.getElementById('prof-pic-el').textContent=first.charAt(0).toUpperCase();
   document.getElementById('dash-name').textContent=first;
-  // Persist to Supabase profiles table
-  try{
-    const userResult=await _supa.auth.getUser();
-    if(userResult.data&&userResult.data.user){
-      const uid=userResult.data.user.id;
-      const {error}=await _supa.from('profiles').update({
-        full_name:fullName,
-        phone:phone,
-        company:company,
-        updated_at:new Date().toISOString(),
-      }).eq('id',uid);
-      if(error){console.error('Profile save error:',error.message);toast('Saved locally but could not sync to server','warn');return;}
-    }
-  }catch(e){console.error('Profile save exception:',e.message);}
   toast('Profile saved ✓','success');
 }
 function handlePicUpload(e){
@@ -503,17 +485,55 @@ function renderAdminScheduleTable(dateVal,docId){
 /* ════ ADMIN BOOKINGS ════ */
 function renderAdminBookings(){
   const filterDate=document.getElementById('adm-book-date').value;
-  let list=filterDate?S.appointments.filter(a=>a.date===filterDate):S.appointments;
-  // Sort ascending: 1st of month listed first, last of month last
-  list=[...list].sort((a,b)=>a.date.localeCompare(b.date)||a.slot.localeCompare(b.slot));
   const todayStr=dateStr(new Date());
+  let list;
+  if(filterDate){
+    // Specific date selected — show all bookings for that date
+    list=S.appointments.filter(a=>a.date===filterDate);
+  } else {
+    // No filter — only show today and future (hide all past dates)
+    list=S.appointments.filter(a=>a.date>=todayStr);
+  }
+  list=[...list].sort((a,b)=>a.date.localeCompare(b.date)||a.slot.localeCompare(b.slot));
+  document.getElementById('adm-bookings-body').innerHTML=list.map((a,i)=>{
+    const company=a.company||'—';
+    const isCancelled=a.status==='cancelled';
+    const rowStyle=isCancelled?'opacity:.5;background:rgba(220,50,50,.06);':'';
+    const srcBadge=a.source==='phone'
+      ?'<span class="chip chip-gold">&#128222; Phone</span>'
+      :'<span class="chip chip-navy">&#127760; Online</span>';
+    const statusBadge=isCancelled
+      ?'<span class="chip chip-red">Cancelled</span>'
+      :'<span class="chip chip-green">Confirmed</span>';
+    const cancelBtn=!isCancelled
+      ?`<button class="btn btn-danger btn-sm" onclick="adminCancelAppt('${a.id}')">Cancel</button>`
+      :'';
+    return`<tr style="${rowStyle}">
+      <td><span class="row-num">${i+1}</span></td>
+      <td>${fmtDate(a.date)}</td>
+      <td>${a.slot}</td>
+      <td>${a.departmentName}</td>
+      <td>${a.name}</td>
+      <td>${a.phone}</td>
+      <td>${company}</td>
+      <td>${srcBadge}</td>
+      <td>${statusBadge}</td>
+      <td>${cancelBtn}</td>
+    </tr>`;
+  }).join('')||'<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">No upcoming bookings found</td></tr>';
+}
+
+/* ════ ADMIN BOOKINGS — HISTORY ════ */
+function showAllBookingsIncPast(){
+  // Temporarily show ALL bookings including past ones
+  const todayStr=dateStr(new Date());
+  const list=[...S.appointments].sort((a,b)=>a.date.localeCompare(b.date)||a.slot.localeCompare(b.slot));
   document.getElementById('adm-bookings-body').innerHTML=list.map((a,i)=>{
     const company=a.company||'—';
     const isPast=a.date<todayStr;
     const isCancelled=a.status==='cancelled';
-    // Grey out row for past dates or cancelled
     const rowStyle=isCancelled?'opacity:.5;background:rgba(220,50,50,.06);'
-                  :isPast?'opacity:.55;background:rgba(0,0,0,.12);':'';
+                  :isPast?'opacity:.45;background:rgba(0,0,0,.12);':'';
     const srcBadge=a.source==='phone'
       ?'<span class="chip chip-gold">&#128222; Phone</span>'
       :'<span class="chip chip-navy">&#127760; Online</span>';
@@ -598,7 +618,41 @@ function renderAdminClients(){
 /* ════ ADMIN MANUAL BOOKING ════ */
 function initManualBookModal(){
   const today=dateStr(new Date());
-  document.getElementById('mb-date').value=today;
+  const dateEl=document.getElementById('mb-date');
+  dateEl.value=today;
+  dateEl.min=today;
+  // Re-render slots when date or member changes
+  dateEl.onchange=renderManualSlots;
+  document.getElementById('mb-member').onchange=renderManualSlots;
+  renderManualSlots();
+}
+
+function renderManualSlots(){
+  const dateVal=document.getElementById('mb-date').value||dateStr(new Date());
+  const memberId=parseInt(document.getElementById('mb-member').value)||0;
+  const todayStr=dateStr(new Date());
+  const isToday=dateVal===todayStr;
+  const now=new Date();
+  const currentMins=now.getHours()*60+now.getMinutes();
+  // Get taken slots for this member+date
+  const taken=S.appointments
+    .filter(a=>a.departmentId===memberId&&a.date===dateVal&&a.status!=='cancelled')
+    .map(a=>a.slot);
+  const sel=document.getElementById('mb-slot');
+  sel.innerHTML=SLOTS.map(t=>{
+    const isTaken=taken.includes(t);
+    let isPast=false;
+    if(isToday){const[h,m]=t.split(':').map(Number);if(h*60+m<=currentMins)isPast=true;}
+    let label=t;
+    let disabled='';
+    let style='';
+    if(isTaken){label=t+' — Booked';disabled='disabled';style='color:#e55;';}
+    else if(isPast){label=t+' — Passed';disabled='disabled';style='color:#888;text-decoration:line-through;';}
+    return`<option value="${t}" ${disabled} style="${style}">${label}</option>`;
+  }).join('');
+  // Auto-select first available slot
+  const firstAvail=sel.querySelector('option:not([disabled])');
+  if(firstAvail) firstAvail.selected=true;
 }
 // doManualBooking() → handled by supabase.js
 
