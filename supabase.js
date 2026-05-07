@@ -189,6 +189,15 @@ _supa.auth.onAuthStateChange(async function(event, session) {
     const u = session.user;
     // If admin is already logged in, don't override with client view
     if (S.userType === 'admin') return;
+    // If client is already logged in (e.g. returning from another app), just refresh data silently
+    if (S.user && S.userType === 'client') {
+      await loadBookings();
+      renderDashboard();
+      renderMyAppointments();
+      renderDepartments();
+      renderSlots();
+      return;
+    }
     showLoading('Loading your bookings…');
     const profile = await _upsertProfile(u);
     await loadBookings();
@@ -264,13 +273,30 @@ window.addEventListener('load', async function() {
   }
 });
 
-window.addEventListener('focus', async function() {
+async function _refreshOnReturn() {
+  if (!S.user) return;
   if (S.userType === 'admin') {
     await loadBookings();
     renderAdminHome();
     renderAdminScheduleForDate();
     renderAdminBookings();
     renderAdminClients();
+  } else if (S.userType === 'client') {
+    await loadBookings();
+    renderDashboard();
+    renderMyAppointments();
+    renderDepartments();
+    renderSlots();
+  }
+}
+
+// Fires when switching back on desktop
+window.addEventListener('focus', _refreshOnReturn);
+
+// Fires when switching back on mobile (more reliable than 'focus' on phones)
+document.addEventListener('visibilitychange', function() {
+  if (document.visibilityState === 'visible') {
+    _refreshOnReturn();
   }
 });
 
