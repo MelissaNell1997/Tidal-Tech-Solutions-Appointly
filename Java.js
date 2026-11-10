@@ -1,777 +1,636 @@
-/* ════ DATA ════ */
-const DOCTORS=[
-  {id:1,name:'Development Team',         spec:'Technical Consultation',color:'#f5a623'},
-  {id:2,name:'Sales',            spec:'Product Demo',          color:'#00c9a7'},
-  {id:3,name:'Support',          spec:'Technical Support',     color:'#00a8c8'},
-  {id:4,name:'Sonja Nell',          spec:'Marketing',      color:'#e8821a'},
-  {id:5,name:'Melissa Nell',          spec:'Sales & Developer',      color:'#e8821a'},
-];
+/* ═══════════════════════════════════════════════════════════════
+   Java.js — Tidal Tech Solutions · Appointly
+   Screens, booking flow and admin views. Data calls live in supabase.js
+   ═══════════════════════════════════════════════════════════════ */
 
-const SLOTS=['08:00','08:30','09:00','09:30','10:00','10:30','11:00','11:30','13:00','13:30','14:00','14:30','15:00','15:30'];
-const MONTHS=['January','February','March','April','May','June','July','August','September','October','November','December'];
-const DAYS=['Su','Mo','Tu','We','Th','Fr','Sa'];
-
-let S={
-  user:null,userType:'client',
-  profiles:[],
-  selDepartment:null,selDate:null,selSlot:null,
-  calY:new Date().getFullYear(),calM:new Date().getMonth(),
-  cancelId:null,
-  adminScheduleDoc:1,
-  adminScheduleDate:'',
-  appointments:[], // loaded from Supabase on login
+/* ════ SETTINGS — edit these to change the portal ════ */
+const BUSINESS = {
+  name     : 'Tidal Tech Solutions',
+  phone    : '+27 81 518 9577',
+  whatsapp : '27815189577',
+  location : 'Durban, KwaZulu-Natal, South Africa',
+  meetingMinutes : 30,
+  bookAheadDays  : 90,
 };
 
-/* ════ PWA ════ */
+// Who clients can book with. Keep the ids the same once bookings exist.
+const DOCTORS = [
+  { id:1, name:'Development Team', spec:'Technical consultation', color:'#ffc233' },
+  { id:2, name:'Sales',            spec:'Product demo',           color:'#8af59a' },
+  { id:3, name:'Support',          spec:'Technical support',      color:'#22d3ee' },
+  { id:4, name:'Sonja Nell',       spec:'Marketing',              color:'#ff8a1f' },
+  { id:5, name:'Melissa Nell',     spec:'Sales & development',    color:'#ff5a3c' },
+];
+
+const SLOTS = ['08:00','08:30','09:00','09:30','10:00','10:30','11:00','11:30','13:00','13:30','14:00','14:30','15:00','15:30'];
+
+// South African public holidays (closed). Add next year's dates when known.
+const HOLIDAYS = [
+  '2026-01-01','2026-04-03','2026-04-06','2026-04-27','2026-05-01','2026-06-16','2026-08-10','2026-09-24','2026-12-16','2026-12-25',
+  '2027-01-01','2027-03-22','2027-03-26','2027-03-29','2027-04-27','2027-06-16','2027-08-09','2027-09-24','2027-12-16','2027-12-27',
+];
+
+const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const DAYS   = ['Su','Mo','Tu','We','Th','Fr','Sa'];
+const WEEKDAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+
+/* ════ STATE ════ */
+let S = {
+  user:null, userType:'client', profile:null,
+  profiles:[], appointments:[], taken:[],
+  selDepartment:null, selDate:null, selSlot:null,
+  calY:new Date().getFullYear(), calM:new Date().getMonth(),
+  apptFilter:'upcoming', bookRange:'upcoming',
+  rescheduleId:null, rschSlot:null,
+  adminScheduleDoc:DOCTORS[0].id,
+};
+
+/* ════ SMALL HELPERS ════ */
+function esc(v){
+  return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function dateStr(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function todayStr(){ return dateStr(new Date()); }
+function parseDate(ds){ const [y,m,d]=String(ds).slice(0,10).split('-').map(Number); return new Date(y,m-1,d); }
+function fmtDate(ds){ const d=parseDate(ds); return `${WEEKDAYS[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`; }
+function fmtShort(ds){ const d=parseDate(ds); return `${WEEKDAYS[d.getDay()].slice(0,3)} ${d.getDate()} ${MONTHS[d.getMonth()].slice(0,3)}`; }
+function addDays(ds,n){ const d=parseDate(ds); d.setDate(d.getDate()+n); return dateStr(d); }
+function maxBookDate(){ return addDays(todayStr(), BUSINESS.bookAheadDays); }
+function isClosedDay(ds){ const d=parseDate(ds).getDay(); return d===0 || d===6 || HOLIDAYS.includes(ds); }
+function slotMinutes(t){ const [h,m]=t.split(':').map(Number); return h*60+m; }
+function nowMinutes(){ const n=new Date(); return n.getHours()*60+n.getMinutes(); }
+function isSlotPast(ds,slot){
+  const t=todayStr();
+  if (ds < t) return true;
+  if (ds > t) return false;
+  return slotMinutes(slot) <= nowMinutes() + 15;   // need at least 15 min notice
+}
+function deptById(id){ return DOCTORS.find(d => d.id === Number(id)) || { id, name:'Team', spec:'', color:'#888' }; }
+function initials(name){ return String(name||'?').trim().split(/\s+/).map(p=>p[0]).slice(0,2).join('').toUpperCase() || '?'; }
+function normPhone(p){
+  let d=String(p||'').replace(/\D/g,'');
+  if (d.startsWith('0')) d='27'+d.slice(1);
+  return d;
+}
+function validPhone(p){ const d=normPhone(p); return d.length>=11 && d.length<=13; }
+function validEmail(e){ return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(e||'').trim()); }
+function waLink(phone,text){ return `https://wa.me/${normPhone(phone)}?text=${encodeURIComponent(text)}`; }
+function isUpcoming(a){ return a.status!=='cancelled' && !isSlotPastStrict(a.date,a.slot); }
+function isSlotPastStrict(ds,slot){ const t=todayStr(); if(ds<t) return true; if(ds>t) return false; return slotMinutes(slot)+BUSINESS.meetingMinutes <= nowMinutes(); }
+function sortAsc(list){ return [...list].sort((a,b)=> a.date.localeCompare(b.date) || a.slot.localeCompare(b.slot)); }
+function store(k,v){ try{ v===undefined ? localStorage.getItem(k) : localStorage.setItem(k,v); }catch(e){} }
+function recall(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
+
+/* ════ TOASTS, BUSY BUTTONS, LOADING ════ */
+function toast(msg,type='info'){
+  const t=document.createElement('div');
+  t.className=`toast ${type}`;
+  const icon = type==='success'?'✓':type==='error'?'✕':type==='warn'?'!':'i';
+  t.innerHTML=`<span class="ti">${icon}</span><span>${esc(msg)}</span>`;
+  const box=document.getElementById('toasts');
+  box.appendChild(t);
+  while (box.children.length>3) box.firstChild.remove();
+  setTimeout(()=>t.remove(), type==='error'?7000:4500);
+}
+function busy(id,on){ const b=document.getElementById(id); if(!b) return; b.classList.toggle('busy',!!on); b.disabled=!!on; }
+function loading(on,msg){
+  const o=document.getElementById('loading-overlay');
+  if (msg) o.querySelector('.loading-msg').textContent=msg;
+  o.classList.toggle('open',!!on);
+}
+function friendlyError(err){
+  const m=String((err && (err.message||err.error_description)) || err || '');
+  if (/invalid login credentials/i.test(m)) return 'That email and password don\'t match. Try again or reset your password.';
+  if (/email not confirmed/i.test(m)) return 'Please confirm your email first. Check your inbox (and spam) for our link.';
+  if (/already registered|already been registered/i.test(m)) return 'This email already has an account. Sign in instead.';
+  if (/password should be at least/i.test(m)) return 'Your password needs at least 8 characters.';
+  if (/rate limit|too many/i.test(m)) return 'Too many attempts. Please wait a minute and try again.';
+  if (/failed to fetch|network/i.test(m)) return 'No connection. Check your internet and try again.';
+  return m || 'Something went wrong. Please try again.';
+}
+
+/* ════ PWA INSTALL ════ */
 let deferredInstallPrompt=null;
-window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstallPrompt=e;});
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferredInstallPrompt=e; maybeShowPWA(); });
+function maybeShowPWA(){
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+  const el=document.getElementById('pwa-banner');
+  if (el) el.classList.toggle('hidden', !!standalone || recall('pwaDismissed')==='1');
+}
 function triggerPWAInstall(){
-  if(deferredInstallPrompt){deferredInstallPrompt.prompt();}
-  else{
-    toast('To install: tap your browser menu → "Add to Home Screen"','info');
-  }
+  if (deferredInstallPrompt){ deferredInstallPrompt.prompt(); deferredInstallPrompt.userChoice.finally(()=>{ deferredInstallPrompt=null; dismissPWA(); }); }
+  else if (/iphone|ipad|ipod/i.test(navigator.userAgent)) toast('On iPhone: tap the Share button, then "Add to Home Screen".','info');
+  else toast('Open your browser menu and choose "Add to Home screen".','info');
 }
+function dismissPWA(){ store('pwaDismissed','1'); document.getElementById('pwa-banner').classList.add('hidden'); }
 
-/* ════ SCREEN NAV ════ */
+/* ════ SCREENS, MODALS, TABS ════ */
 function showScreen(id){
-  document.querySelectorAll('.screen').forEach(s=>{s.classList.remove('active');s.style.display='none';});
-  const el=document.getElementById('screen-'+id);
-  el.classList.add('active');
-  el.style.display='flex';
-  if(id==='app') el.style.flexDirection='column';
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  document.getElementById('screen-'+id).classList.add('active');
+  window.scrollTo(0,0);
+}
+function openModal(id){
+  const m=document.getElementById(id); m.classList.add('open');
+  const f=m.querySelector('input:not([type=checkbox]):not([readonly]),select,textarea'); if (f && window.innerWidth>760) setTimeout(()=>f.focus(),50);
+}
+function closeModal(id){ document.getElementById(id).classList.remove('open'); }
+document.addEventListener('keydown', e => { if (e.key==='Escape') document.querySelectorAll('.modal-overlay.open').forEach(m=>{ if(m.id!=='new-pw-modal') m.classList.remove('open'); }); });
+document.addEventListener('click', e => { if (e.target.classList && e.target.classList.contains('modal-overlay') && e.target.id!=='new-pw-modal' && e.target.id!=='success-modal') e.target.classList.remove('open'); });
+
+function confirmDialog(title,text,yesLabel){
+  return new Promise(resolve=>{
+    document.getElementById('confirm-title').textContent=title;
+    document.getElementById('confirm-text').textContent=text||'';
+    const yes=document.getElementById('confirm-yes'), no=document.getElementById('confirm-no');
+    yes.textContent=yesLabel||'Yes';
+    const done=v=>{ closeModal('confirm-modal'); yes.onclick=no.onclick=null; resolve(v); };
+    yes.onclick=()=>done(true); no.onclick=()=>done(false);
+    openModal('confirm-modal');
+  });
 }
 
-/* ════ MODALS ════ */
-function openModal(id){document.getElementById(id).classList.add('open');}
-function closeModal(id){document.getElementById(id).classList.remove('open');}
+function showTab(id){
+  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
+  const panel=document.getElementById('tab-'+id); if(!panel) return;
+  panel.classList.add('active');
+  document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('active', b.dataset.tab===id));
+  window.scrollTo({top:0,behavior:'smooth'});
+  if (id==='dashboard') renderDashboard();
+  if (id==='book'){ refreshTaken().then(()=>{ renderDepartments(); renderCalendar(); renderSlots(); }); renderDepartments(); renderCalendar(); renderSlots(); }
+  if (id==='my-appts') renderMyAppointments();
+  if (id==='profile') prefillClientForms();
+  if (id==='admin-home') renderAdminHome();
+  if (id==='admin-schedule'){ if(!document.getElementById('adm-date-picker').value) setAdminDateToday(); else renderAdminScheduleForDate(); }
+  if (id==='admin-bookings') renderAdminBookings();
+  if (id==='admin-clients') renderAdminClients();
+}
 
-/* ════ FORGOT PASSWORD ════ */
+/* ════ AUTH SCREEN ════ */
+function openAuth(tab){ switchAuthTab(tab); showScreen('auth'); }
+function switchAuthTab(t){
+  const login=t==='login';
+  document.getElementById('atab-login').classList.toggle('active',login);
+  document.getElementById('atab-reg').classList.toggle('active',!login);
+  document.getElementById('auth-login-form').classList.toggle('hidden',!login);
+  document.getElementById('auth-reg-form').classList.toggle('hidden',login);
+  document.getElementById('auth-title').textContent = login ? 'Welcome back' : 'Create your account';
+  document.getElementById('auth-sub').textContent   = login ? 'Sign in to book or manage your meetings.' : 'It takes 30 seconds. Then pick a time.';
+}
+function togglePw(id,btn){
+  const el=document.getElementById(id); const show=el.type==='password';
+  el.type=show?'text':'password'; btn.textContent=show?'Hide':'Show';
+}
 function doForgotPassword(){
   document.getElementById('forgot-pw-form').classList.remove('hidden');
   document.getElementById('forgot-pw-sent').classList.add('hidden');
-  document.getElementById('forgot-pw-email').value='';
+  document.getElementById('forgot-pw-email').value=document.getElementById('li-email').value||'';
   openModal('forgot-pw-modal');
 }
-// doForgotPasswordSubmit() → handled by supabase.js
 
-// googleLogin()    → handled by supabase.js
-// doLogin()        → handled by supabase.js
-// doRegister()     → handled by supabase.js
-// logout()         → handled by supabase.js
-// confirmBooking() → handled by supabase.js
-// doManualBooking()→ handled by supabase.js
-// adminCancelAppt()→ handled by supabase.js
-
-/* ════ AUTH ════ */
-function switchAuthTab(t){
-  document.getElementById('atab-login').classList.toggle('active',t==='login');
-  document.getElementById('atab-reg').classList.toggle('active',t==='register');
-  document.getElementById('auth-login-form').classList.toggle('hidden',t!=='login');
-  document.getElementById('auth-reg-form').classList.toggle('hidden',t!=='register');
-}
-
-// doAdminLogin() → handled by supabase.js (fetches data + starts real-time)
-function loginClient(user){
-  S.user=user;S.userType='client';
+/* ════ ENTER THE APP ════ */
+function enterClientApp(){
+  S.userType='client';
   document.getElementById('client-nav').classList.remove('hidden');
   document.getElementById('admin-nav').classList.add('hidden');
-  document.getElementById('top-avatar').textContent=user.name.charAt(0).toUpperCase();
-  document.getElementById('drawer-client').style.display='block';
-  document.getElementById('drawer-admin').style.display='none';
-  prefillClientForms(user);
+  document.getElementById('bottom-nav-client').classList.remove('hidden');
+  document.getElementById('bottom-nav-admin').classList.add('hidden');
+  document.getElementById('role-pill').classList.add('hidden');
+  setAvatar();
+  prefillClientForms();
   showScreen('app');
-  renderCalendar();
-  renderDepartments();
-  renderDashboard();
+  maybeShowPWA();
   showTab('dashboard');
 }
-function prefillClientForms(u){
-  const parts=u.name.split(' ');
-  const fields={
-    'pf-first':parts[0]||'','pf-last':parts.slice(1).join(' ')||'',
-    'pf-email':u.email||'','pf-phone':u.phone||'','pf-id':u.company||'',
-    'bk-name':u.name,'bk-phone':u.phone||'','bk-id':u.company||'',
-  };
-  for(const[id,val]of Object.entries(fields)){const el=document.getElementById(id);if(el)el.value=val;}
-  document.getElementById('prof-name-disp').textContent=u.name;
-  document.getElementById('prof-email-disp').textContent=u.email;
-  document.getElementById('prof-pic-el').textContent=u.name.charAt(0).toUpperCase();
+function enterAdminApp(){
+  S.userType='admin';
+  document.getElementById('client-nav').classList.add('hidden');
+  document.getElementById('admin-nav').classList.remove('hidden');
+  document.getElementById('bottom-nav-client').classList.add('hidden');
+  document.getElementById('bottom-nav-admin').classList.remove('hidden');
+  document.getElementById('role-pill').classList.remove('hidden');
+  setAvatar();
+  showScreen('app');
+  showTab('admin-home');
 }
-// logout() → handled by supabase.js
-
-/* ════ TABS ════ */
-function showTab(id){
-  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
-  document.getElementById('tab-'+id).classList.add('active');
-  document.querySelectorAll('.tnav-btn').forEach(b=>b.classList.toggle('active',b.dataset.tab===id));
-  // sync mobile drawer active state
-  document.querySelectorAll('.mobile-drawer a').forEach(a=>{
-    const match=a.getAttribute('onclick')&&a.getAttribute('onclick').includes("'"+id+"'");
-    a.classList.toggle('active',!!match);
-  });
-  if(id==='my-appts') renderMyAppointments();
-  if(id==='dashboard') renderDashboard();
-  if(id==='admin-home') renderAdminHome();
-  if(id==='admin-schedule'){setAdminDateToday();renderAdminScheduleForDate();}
-  if(id==='admin-clients') renderAdminClients();
-  if(id==='admin-bookings') renderAdminBookings();
+function setAvatar(){
+  const el=document.getElementById('top-avatar');
+  const url=S.profile && S.profile.avatar_url;
+  el.innerHTML = url ? `<img src="${esc(url)}" alt=""/>` : esc(initials(S.user && S.user.name));
+  el.onclick = () => S.userType==='client' ? showTab('profile') : null;
 }
 
-/* ════ NOTIFICATION TOGGLE ════ */
-function toggleNotifOpt(type){
-  const el=document.getElementById('notif-'+type+'-opt');
-  el.classList.toggle('sel');
-}
+/* ════ CLIENT: HOME ════ */
+function myAppointments(){ return S.appointments.filter(a => S.userType==='admin' || a.email===S.user.email || (S.user.id && a.user_id===S.user.id)); }
 
-/* ════ DASHBOARD ════ */
 function renderDashboard(){
-  if(!S.user||S.userType!=='client')return;
-  const today=new Date();today.setHours(0,0,0,0);
-  const mine=S.appointments.filter(a=>a.email===S.user.email);
-  // Sort all by date ascending (earliest first)
-  const mineAsc=[...mine].sort((a,b)=>a.date.localeCompare(b.date));
-  const upcoming=mineAsc.filter(a=>new Date(a.date+'T00:00:00')>=today&&a.status!=='cancelled');
-  const cancelled=mineAsc.filter(a=>a.status==='cancelled');
-  const past=mineAsc.filter(a=>new Date(a.date+'T00:00:00')<today&&a.status!=='cancelled');
-  document.getElementById('dash-name').textContent=S.user.name.split(' ')[0];
-  document.getElementById('stat-up').textContent=upcoming.length;
-  document.getElementById('stat-past').textContent=past.length;
-  document.getElementById('stat-docs').textContent=[...new Set(mine.map(a=>a.departmentId))].length;
-  const cont=document.getElementById('dash-appt-list');
-  let html='';
-  if(upcoming.length){
-    html+=upcoming.slice(0,3).map(a=>apptCardHTML(a,false)).join('');
-  }
-  // Show recent cancellations on dashboard
-  const recentCancels=cancelled.slice(-2).reverse();
-  if(recentCancels.length){
-    html+=`<div style="margin-top:14px;font-size:.8rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;padding:4px 2px">Recent Cancellations</div>`;
-    html+=recentCancels.map(a=>apptCardHTML(a,false)).join('');
-  }
-  if(!html){cont.innerHTML=`<div class="empty-state"><div class="esi">📅</div><p>No upcoming appointments. <a style="color:var(--teal);cursor:pointer" onclick="showTab('book')">Book now →</a></p></div>`;return;}
-  cont.innerHTML=html;
+  if (!S.user || S.userType!=='client') return;
+  document.getElementById('dash-name').textContent = (S.user.name||'there').split(' ')[0];
+  const upcoming = sortAsc(myAppointments().filter(isUpcoming));
+  const next = upcoming[0];
+  const nextBox=document.getElementById('next-appt');
+  if (next){
+    const d=deptById(next.departmentId);
+    nextBox.innerHTML = `<div class="next-card">
+      <div><div class="lbl">Your next meeting</div>
+      <div class="when">${esc(fmtDate(next.date))} at ${esc(next.slot)}</div>
+      <div class="meta">With ${esc(d.name)} · ${esc(next.reason||d.spec)}</div></div>
+      <div class="acts">
+        <a class="btn btn-line btn-sm" href="${esc(buildGoogleCalendarUrl(next))}" target="_blank" rel="noopener">Add to calendar</a>
+        <button class="btn btn-line btn-sm" onclick="openRescheduleCancel('${esc(next.id)}')">Move</button>
+      </div></div>`;
+  } else nextBox.innerHTML='';
+  const list=document.getElementById('dash-appt-list');
+  const rest=upcoming.slice(1,4);
+  if (!upcoming.length) list.innerHTML = emptyState('📅','No upcoming meetings yet.','Book a meeting',"showTab('book')");
+  else if (!rest.length) list.innerHTML = `<p class="hint">Nothing else booked. <button class="link-btn" style="display:inline;margin:0" onclick="showTab('book')">Book another →</button></p>`;
+  else list.innerHTML = rest.map(a=>apptCardHTML(a,true)).join('');
+}
+function emptyState(icon,text,btnLabel,action){
+  return `<div class="empty-state"><div class="esi">${icon}</div><p>${esc(text)}</p>${btnLabel?`<button class="btn btn-sun btn-sm" style="margin-top:12px" onclick="${action}">${esc(btnLabel)}</button>`:''}</div>`;
 }
 
-/* ════ DOCTORS ════ */
+/* ════ CLIENT: BOOKING FLOW ════ */
+function takenFor(deptId,ds,excludeId){
+  if (S.userType==='admin') return S.appointments.filter(a=>a.departmentId===deptId && a.date===ds && a.status!=='cancelled' && String(a.id)!==String(excludeId)).map(a=>a.slot);
+  const mine = S.appointments.find(a=>String(a.id)===String(excludeId));
+  return S.taken.filter(t=>Number(t.department_id)===deptId && String(t.date).slice(0,10)===ds)
+    .map(t=>t.slot)
+    .filter(s => !(mine && mine.departmentId===deptId && mine.date===ds && mine.slot===s));
+}
+function freeSlots(deptId,ds,excludeId){
+  if (isClosedDay(ds)) return [];
+  const taken=takenFor(deptId,ds,excludeId);
+  return SLOTS.filter(s=>!taken.includes(s) && !isSlotPast(ds,s));
+}
+
 function renderDepartments(){
-  const today=dateStr(new Date());
-  document.getElementById('doc-list').innerHTML=DOCTORS.map(d=>{
-    const cnt=S.appointments.filter(a=>a.departmentId===d.id&&a.date===today&&a.status!=='cancelled').length;
-    const full=cnt>=SLOTS.length;
-    return`<div class="doc-card ${full?'fully-booked':''} ${S.selDepartment?.id===d.id?'selected':''}" onclick="${full?'':('selectDepartment('+d.id+')')}" data-did="${d.id}">
-      <div class="doc-avatar" style="background:${d.color}">${d.name.charAt(4)}</div>
-      <div class="doc-info"><h4>${d.name}</h4><p>${d.spec}</p></div>
-      <span class="chip ${full?'chip-red':'chip-green'}">${full?'Fully Booked':'Available'}</span>
-    </div>`;
+  const t=todayStr();
+  document.getElementById('doc-list').innerHTML = DOCTORS.map(d=>{
+    const sel=S.selDepartment && S.selDepartment.id===d.id;
+    return `<button type="button" class="doc-card ${sel?'selected':''}" onclick="selectDepartment(${d.id})" aria-pressed="${sel}">
+      <span class="doc-avatar" style="background:${d.color}">${esc(initials(d.name))}</span>
+      <span class="doc-info"><h4>${esc(d.name)}</h4><p>${esc(d.spec)}</p></span>
+      <span class="tick">✓</span></button>`;
   }).join('');
 }
 function selectDepartment(id){
-  S.selDepartment=DOCTORS.find(d=>d.id===id);
-  document.querySelectorAll('.doc-card').forEach(c=>c.classList.toggle('selected',parseInt(c.dataset.did)===id));
-  renderSlots();
+  S.selDepartment=deptById(id);
+  if (S.selSlot && S.selDate && takenFor(id,S.selDate).includes(S.selSlot)) S.selSlot=null;
+  renderDepartments(); renderCalendar(); renderSlots();
+  if (window.innerWidth<=900) document.getElementById('card-step2').scrollIntoView({behavior:'smooth',block:'start'});
 }
 
-/* ════ CALENDAR ════ */
 function renderCalendar(){
+  const t=todayStr(), max=maxBookDate();
   document.getElementById('cal-label').textContent=MONTHS[S.calM]+' '+S.calY;
+  const now=new Date();
+  document.getElementById('cal-prev').disabled = (S.calY<now.getFullYear()) || (S.calY===now.getFullYear() && S.calM<=now.getMonth());
   const first=new Date(S.calY,S.calM,1).getDay();
   const total=new Date(S.calY,S.calM+1,0).getDate();
-  const today=new Date();today.setHours(0,0,0,0);
   let html=DAYS.map(d=>`<div class="cal-dn">${d}</div>`).join('');
-  for(let i=0;i<first;i++) html+='<div class="cal-d empty"></div>';
-  for(let d=1;d<=total;d++){
-    const dt=new Date(S.calY,S.calM,d);
-    const ds=dateStr(dt);
-    const isPast=dt<today,isWE=dt.getDay()===0||dt.getDay()===6,isTod=dt.getTime()===today.getTime(),isSel=ds===S.selDate;
-    const dim=isPast||isWE;
-    html+=`<div class="cal-d ${dim?'dim':''} ${isTod&&!isSel?'today':''} ${isSel?'sel':''}" ${!dim?`onclick="selectDate('${ds}')"`:''} >${d}</div>`;
+  for (let i=0;i<first;i++) html+='<div class="cal-d empty"></div>';
+  for (let d=1; d<=total; d++){
+    const ds=dateStr(new Date(S.calY,S.calM,d));
+    const closed = ds<t || ds>max || isClosedDay(ds);
+    const full = !closed && S.selDepartment && freeSlots(S.selDepartment.id,ds).length===0;
+    const cls = ['cal-d', closed?'dim':'', full?'full':'', ds===t?'today':'', ds===S.selDate?'sel':''].join(' ');
+    const label = closed ? 'closed' : full ? 'fully booked' : 'available';
+    html += closed || full
+      ? `<div class="${cls}" aria-label="${d} ${label}">${d}</div>`
+      : `<button type="button" class="${cls}" onclick="selectDate('${ds}')" aria-label="${fmtDate(ds)}">${d}</button>`;
   }
   document.getElementById('cal-grid').innerHTML=html;
 }
 function changeMonth(dir){
   S.calM+=dir;
-  if(S.calM<0){S.calM=11;S.calY--;}
-  if(S.calM>11){S.calM=0;S.calY++;}
+  if (S.calM<0){S.calM=11;S.calY--;}
+  if (S.calM>11){S.calM=0;S.calY++;}
   renderCalendar();
 }
-function selectDate(ds){S.selDate=ds;renderCalendar();renderSlots();}
+function selectDate(ds){
+  S.selDate=ds; S.selSlot=null; renderCalendar(); renderSlots();
+  if (window.innerWidth<=900) document.getElementById('card-step3').scrollIntoView({behavior:'smooth',block:'start'});
+}
 
-/* ════ SLOTS ════ */
+function slotButtonsHTML(deptId,ds,selected,onclickFn,excludeId){
+  const taken=takenFor(deptId,ds,excludeId);
+  let html='', lastGroup='';
+  SLOTS.forEach(t=>{
+    const group = slotMinutes(t)<720 ? 'Morning' : 'Afternoon';
+    if (group!==lastGroup){ html+=`<div class="slot-group">${group}</div>`; lastGroup=group; }
+    const isTaken=taken.includes(t), past=isSlotPast(ds,t);
+    if (isTaken || past) html+=`<button type="button" class="slot-btn ${isTaken?'taken':'past-time'}" disabled>${t}<small>${isTaken?'Booked':'Passed'}</small></button>`;
+    else html+=`<button type="button" class="slot-btn ${t===selected?'sel':'free'}" onclick="${onclickFn}('${t}')">${t}</button>`;
+  });
+  return html;
+}
 function renderSlots(){
-  const hint=document.getElementById('slot-hint');
-  const grid=document.getElementById('slots-grid');
-  if(!S.selDepartment||!S.selDate){hint.textContent='Select a department and date first.';grid.innerHTML='';updateBookSummary();return;}
-  hint.textContent=`${S.selDepartment.name} — ${fmtDate(S.selDate)}`;
-  const taken=S.appointments.filter(a=>a.departmentId===S.selDepartment.id&&a.date===S.selDate&&a.status!=='cancelled').map(a=>a.slot);
-  // Grey out slots that have already passed today
-  const now=new Date();
-  const todayStr=dateStr(now);
-  const isToday=(S.selDate===todayStr);
-  const currentMins=now.getHours()*60+now.getMinutes();
-  grid.innerHTML=SLOTS.map(t=>{
-    const isTaken=taken.includes(t),isSel=t===S.selSlot;
-    let isPastTime=false;
-    if(isToday){const[h,m]=t.split(':').map(Number);if(h*60+m<=currentMins)isPastTime=true;}
-    const isDisabled=isTaken||isPastTime;
-    let cls=isDisabled?(isPastTime&&!isTaken?'past-time':'taken'):(isSel?'sel':'free');
-    return`<div class="slot-btn ${cls}" onclick="${isDisabled?'':(`selectSlot('${t}')`)}">` +
-           `${t}${isTaken?'<br><small>Booked</small>':isPastTime?'<br><small>Passed</small>':''}</div>`;
-  }).join('');
+  const hint=document.getElementById('slot-hint'), grid=document.getElementById('slots-grid');
+  if (!S.selDepartment || !S.selDate){
+    hint.textContent = !S.selDepartment ? 'Choose who you\'d like to meet first.' : 'Now choose a day.';
+    grid.innerHTML=''; updateBookSummary(); return;
+  }
+  const free=freeSlots(S.selDepartment.id,S.selDate);
+  hint.textContent = free.length ? `${fmtDate(S.selDate)} with ${S.selDepartment.name}` : `No times left on ${fmtDate(S.selDate)}. Please pick another day.`;
+  grid.innerHTML = slotButtonsHTML(S.selDepartment.id,S.selDate,S.selSlot,'selectSlot');
   updateBookSummary();
 }
-function selectSlot(t){S.selSlot=t;renderSlots();}
+function selectSlot(t){
+  S.selSlot=t; renderSlots();
+  if (window.innerWidth<=900) document.getElementById('card-step4').scrollIntoView({behavior:'smooth',block:'start'});
+}
 function updateBookSummary(){
-  const el=document.getElementById('book-summary');
-  if(S.selDepartment&&S.selDate&&S.selSlot){
-    el.style.display='block';
-    el.innerHTML=`<strong>Department:</strong> ${S.selDepartment.name}<br><strong>Date:</strong> ${fmtDate(S.selDate)}<br><strong>Time:</strong> ${S.selSlot}<br><strong>Specialty:</strong> ${S.selDepartment.spec}`;
-  } else el.style.display='none';
-}
-
-// confirmBooking() → handled by supabase.js
-
-/* ════ EMAIL PREVIEW ════ */
-function showEmailPreview(appt,type){
-  const isCancel=type==='cancel',isReschedule=type==='reschedule';
-  const ma=appt.maProvider?`${appt.maProvider} — ${appt.maPlan} (${appt.maNum})`:'Self-pay';
-  let subject,bodyHtml;
-  if(isCancel){
-    subject='Appointment Cancellation Confirmation';
-    bodyHtml=`<p>Dear ${appt.name},</p>
-    <p>Your appointment on <strong>${fmtDate(appt.date)}</strong> at <strong>${appt.slot}</strong> with <strong>${appt.departmentName}</strong> has been <strong>cancelled</strong>.</p>
-    <p>To rebook, please visit our client portal or call <strong>+27 31 000 0000</strong>.</p>`;
-  } else if(isReschedule){
-    subject='Appointment Rescheduled';
-    bodyHtml=`<p>Dear ${appt.name},</p>
-    <p>Your appointment has been <strong>rescheduled</strong> to <strong>${fmtDate(appt.date)}</strong> at <strong>${appt.slot}</strong> with <strong>${appt.departmentName}</strong>.</p>`;
+  const el=document.getElementById('book-summary'), btn=document.getElementById('btn-book'), hint=document.getElementById('book-hint');
+  const ready = S.selDepartment && S.selDate && S.selSlot;
+  if (ready){
+    el.classList.remove('empty');
+    el.innerHTML=`<b>With</b> ${esc(S.selDepartment.name)}<br><b>Day</b> ${esc(fmtDate(S.selDate))}<br><b>Time</b> ${esc(S.selSlot)} (${BUSINESS.meetingMinutes} min)`;
   } else {
-    subject='Appointment Confirmation — Tidal Tech Solutions';
-    bodyHtml=`<p>Dear ${appt.name},</p>
-    <p>Your appointment has been <strong>confirmed</strong>.</p>
-    <p><strong>Department:</strong> ${appt.departmentName}<br>
-    <strong>Date:</strong> ${fmtDate(appt.date)}<br>
-    <strong>Time:</strong> ${appt.slot}</p>`;
+    el.classList.add('empty');
+    el.textContent = S.selDepartment ? (S.selDate ? 'Now pick a time.' : 'Now choose a day.') : 'Your choices will show here.';
   }
-  document.getElementById('email-preview-body').innerHTML=`
-    <div class="email-from"><strong>From:</strong> noreply@tidaltech.co.za &nbsp;·&nbsp; <strong>To:</strong> ${appt.email||appt.name} &nbsp;·&nbsp; <strong>Subject:</strong> ${subject}</div>
-    ${bodyHtml}
-    <p style="margin-top:12px">Kind regards,<br><strong>Tidal Tech Solutions</strong></p>`;
-  openModal('email-modal');
+  btn.disabled=!ready;
+  hint.classList.toggle('hidden',!!ready);
+  const steps=document.querySelectorAll('#stepper li');
+  const done=[!!S.selDepartment,!!S.selDate,!!S.selSlot,false];
+  const cur = !S.selDepartment?0:!S.selDate?1:!S.selSlot?2:3;
+  steps.forEach((li,i)=>{ li.classList.toggle('done',done[i]); li.classList.toggle('on',i===cur); });
 }
+function resetBookingSelection(){ S.selSlot=null; S.selDate=null; document.getElementById('bk-reason').value=''; }
 
-/* ════ MY APPOINTMENTS ════ */
+/* ════ CLIENT: MY BOOKINGS ════ */
+function setApptFilter(f){
+  S.apptFilter=f;
+  document.querySelectorAll('#tab-my-appts [data-filter]').forEach(b=>b.classList.toggle('active',b.dataset.filter===f));
+  renderMyAppointments();
+}
 function renderMyAppointments(){
   const list=document.getElementById('my-appt-list');
-  // Sort from 1st of month to last (ascending by date = earliest first)
-  const mine=S.appointments.filter(a=>a.email===S.user?.email).sort((a,b)=>a.date.localeCompare(b.date));
-  if(!mine.length){list.innerHTML=`<div class="empty-state"><div class="esi">📋</div><p>No appointments yet. <a style="color:var(--teal);cursor:pointer" onclick="showTab('book')">Book one →</a></p></div>`;return;}
-  list.innerHTML=mine.map(a=>apptCardHTML(a,true)).join('');
+  const mine=myAppointments();
+  let items;
+  if (S.apptFilter==='upcoming') items=sortAsc(mine.filter(isUpcoming));
+  else if (S.apptFilter==='past') items=sortAsc(mine.filter(a=>a.status!=='cancelled' && !isUpcoming(a))).reverse();
+  else items=sortAsc(mine.filter(a=>a.status==='cancelled')).reverse();
+  if (!items.length){
+    list.innerHTML = S.apptFilter==='upcoming' ? emptyState('📅','You have no upcoming meetings.','Book a meeting',"showTab('book')") : emptyState('🗂️','Nothing here yet.');
+    return;
+  }
+  list.innerHTML=items.map(a=>apptCardHTML(a,true)).join('');
 }
 function apptCardHTML(a,showActions){
-  const d=new Date(a.date+'T00:00:00');
-  const today=new Date();today.setHours(0,0,0,0);
-  const isPast=d<today,isCancelled=a.status==='cancelled';
-  // Greyed-out styling: cancelled always grey, past also greyed
-  const cardClass=isCancelled?'cancelled':isPast?'past':'';
-  return`<div class="appt-card ${cardClass}">
-    <div class="appt-date-box"><div class="aday">${d.getDate()}</div><div class="amon">${MONTHS[d.getMonth()].slice(0,3)}</div></div>
-    <div class="appt-info">
-      <h4>${a.departmentName} &mdash; ${a.slot}${isCancelled?' <span style="color:#e55;font-size:.8rem;font-weight:600">(Cancelled)</span>':''}</h4>
-      <p>${a.reason||'General visit'} &nbsp;|&nbsp; ${a.phone}</p>
-    </div>
-    <div class="appt-acts">
-      <span class="chip ${isCancelled?'chip-red':isPast?'chip-gold':'chip-green'}">${isCancelled?'Cancelled':isPast?'Completed':'Confirmed'}</span>
-      ${showActions&&!isPast&&!isCancelled?`<button class="btn btn-warn btn-sm" onclick="openRescheduleCancel('${a.id}')">Reschedule / Cancel</button>`:''}
-      ${!isPast&&!isCancelled?`<a href="${buildGoogleCalendarUrl(a)}" target="_blank" rel="noopener" class="btn btn-sm" style="background:#4285F4;color:#fff;text-decoration:none;display:inline-block;margin-top:6px">📅 Add to Google Calendar</a>`:''}
-    </div>
+  const d=parseDate(a.date), dept=deptById(a.departmentId);
+  const cancelled=a.status==='cancelled', past=!cancelled && !isUpcoming(a);
+  const chip = cancelled ? '<span class="chip chip-red">Cancelled</span>' : past ? '<span class="chip chip-grey">Done</span>' : '<span class="chip chip-green">Confirmed</span>';
+  const acts = showActions && !cancelled && !past ? `
+      <a class="btn btn-line btn-xs" href="${esc(buildGoogleCalendarUrl(a))}" target="_blank" rel="noopener">📅 Calendar</a>
+      <button class="btn btn-line btn-xs" onclick="openRescheduleCancel('${esc(a.id)}')">Move</button>
+      <button class="btn btn-line btn-xs" onclick="clientCancel('${esc(a.id)}')">Cancel</button>` : '';
+  return `<div class="appt-card ${cancelled?'cancelled':past?'past':''}">
+    <div class="appt-date-box"><div class="awk">${WEEKDAYS[d.getDay()].slice(0,3)}</div><div class="aday">${d.getDate()}</div><div class="amon">${MONTHS[d.getMonth()].slice(0,3)}</div></div>
+    <div class="appt-info"><h4>${esc(a.slot)} · ${esc(dept.name)}</h4><p>${esc(a.reason||dept.spec)}</p></div>
+    <div class="appt-acts">${chip}${acts}</div>
   </div>`;
 }
 
-/* ════ RESCHEDULE / CANCEL ════ */
+/* ════ RESCHEDULE ════ */
 function openRescheduleCancel(id){
-  S.cancelId=id;
-  // Pre-fill current date in reschedule picker
-  const appt=S.appointments.find(a=>String(a.id)===String(id));
-  if(appt){
-    const dateEl=document.getElementById('rsch-date');
-    if(dateEl) dateEl.value=appt.date;
-    // Set min date to today
-    const today=dateStr(new Date());
-    if(dateEl) dateEl.min=today;
-  }
+  const a=S.appointments.find(x=>String(x.id)===String(id)); if(!a) return;
+  S.rescheduleId=a.id; S.rschSlot=null;
+  document.getElementById('rsch-current').innerHTML=`Currently: <b>${esc(fmtDate(a.date))} at ${esc(a.slot)}</b> with ${esc(deptById(a.departmentId).name)}.`;
+  const el=document.getElementById('rsch-date');
+  el.min=todayStr(); el.max=maxBookDate();
+  el.value = isSlotPast(a.date,'15:30') ? nextOpenDay(todayStr()) : a.date;
+  renderRescheduleSlots();
   openModal('reschedule-modal');
+  refreshTaken().then(renderRescheduleSlots);
 }
-
-async function doCancel(){
-  const appt=S.appointments.find(a=>String(a.id)===String(S.cancelId));
-  if(!appt){toast('Appointment not found','error');return;}
-
-  // Update in Supabase
-  if(typeof _supa!=='undefined'){
-    const {error}=await _supa.from('bookings').update({status:'cancelled'}).eq('id',appt.id);
-    if(error){ toast('Could not cancel: '+error.message,'error'); return; }
-  }
-
-  appt.status='cancelled';
-  closeModal('reschedule-modal');
-
-  // Send email notification
-  if(typeof _sendBookingEmail==='function') await _sendBookingEmail(appt,'cancel');
-  else showEmailPreview(appt,'cancel');
-
-  toast('Appointment cancelled. A confirmation email has been sent.','info');
-  renderMyAppointments();
-  renderDashboard();
+function nextOpenDay(ds){ let d=ds; for(let i=0;i<14;i++){ if(!isClosedDay(d) && !isSlotPast(d,'15:30')) return d; d=addDays(d,1);} return ds; }
+function renderRescheduleSlots(){
+  const a=S.appointments.find(x=>String(x.id)===String(S.rescheduleId)); if(!a) return;
+  const ds=document.getElementById('rsch-date').value, box=document.getElementById('rsch-slots');
+  document.getElementById('btn-rsch').disabled=true;
+  if (!ds){ box.innerHTML='<p class="hint">Pick a day.</p>'; return; }
+  if (isClosedDay(ds)){ box.innerHTML='<p class="hint" style="grid-column:1/-1">We\'re closed that day. Please choose a weekday.</p>'; S.rschSlot=null; return; }
+  box.innerHTML=slotButtonsHTML(a.departmentId,ds,S.rschSlot,'pickRescheduleSlot',a.id);
+  document.getElementById('btn-rsch').disabled=!S.rschSlot;
 }
-
-async function doReschedule(){
-  const appt=S.appointments.find(a=>String(a.id)===String(S.cancelId));
-  const newDate=document.getElementById('rsch-date').value;
-  const newSlot=document.getElementById('rsch-slot').value;
-  if(!newDate||!newSlot){toast('Please select a new date and time','error');return;}
-  if(!appt) return;
-
-  // Check slot not already taken
-  const taken=S.appointments.filter(a=>
-    a.departmentId===appt.departmentId &&
-    a.date===newDate &&
-    a.slot===newSlot &&
-    a.status!=='cancelled' &&
-    a.id!==appt.id
-  );
-  if(taken.length){toast('That time slot is already taken. Please choose another.','error');return;}
-
-  // Update in Supabase
-  if(typeof _supa!=='undefined'){
-    const {error}=await _supa.from('bookings').update({date:newDate,slot:newSlot,status:'confirmed'}).eq('id',appt.id);
-    if(error){ toast('Could not reschedule: '+error.message,'error'); return; }
-  }
-
-  appt.date=newDate;
-  appt.slot=newSlot;
-  appt.status='confirmed';
-  closeModal('reschedule-modal');
-
-  // Send email notification
-  if(typeof _sendBookingEmail==='function') await _sendBookingEmail(appt,'reschedule');
-  else showEmailPreview(appt,'reschedule');
-
-  toast('Appointment rescheduled ✓ A confirmation email has been sent.','success');
-  renderMyAppointments();
-  renderDashboard();
-}
+function pickRescheduleSlot(t){ S.rschSlot=t; renderRescheduleSlots(); }
 
 /* ════ PROFILE ════ */
-function saveProfile(){
-  const first=document.getElementById('pf-first').value.trim();
-  const last=document.getElementById('pf-last').value.trim();
-  if(!first){toast('First name required','error');return;}
-  S.user.name=first+' '+last;
-  S.user.email=document.getElementById('pf-email').value.trim();
-  S.user.phone=document.getElementById('pf-phone').value.trim();
-  document.getElementById('prof-name-disp').textContent=S.user.name;
-  document.getElementById('prof-email-disp').textContent=S.user.email;
-  document.getElementById('top-avatar').textContent=first.charAt(0).toUpperCase();
-  document.getElementById('prof-pic-el').textContent=first.charAt(0).toUpperCase();
-  document.getElementById('dash-name').textContent=first;
-  toast('Profile saved ✓','success');
-}
-function handlePicUpload(e){
-  const file=e.target.files[0];if(!file)return;
-  const reader=new FileReader();
-  reader.onload=ev=>{
-    const src=ev.target.result;
-    document.getElementById('prof-pic-el').innerHTML=`<img src="${src}"/>`;
-    document.getElementById('top-avatar').innerHTML=`<img src="${src}" style="width:100%;height:100%;object-fit:cover;border-radius:50%">`;
-    toast('Profile photo updated!','success');
-  };
-  reader.readAsDataURL(file);
+function prefillClientForms(){
+  const u=S.user; if(!u) return;
+  const parts=(u.name||'').split(' ');
+  const set=(id,v)=>{ const el=document.getElementById(id); if(el && !el.matches(':focus')) el.value=v||''; };
+  set('pf-first',parts[0]); set('pf-last',parts.slice(1).join(' '));
+  set('pf-email',u.email); set('pf-phone',u.phone); set('pf-id',u.company);
+  set('bk-name',u.name); set('bk-phone',u.phone); set('bk-id',u.company);
+  document.getElementById('prof-name-disp').textContent=u.name||'';
+  document.getElementById('prof-email-disp').textContent=u.email||'';
+  const pic=document.getElementById('prof-pic-el');
+  const url=S.profile && S.profile.avatar_url;
+  pic.innerHTML = url ? `<img src="${esc(url)}" alt=""/>` : esc(initials(u.name));
 }
 
-/* ════ ADMIN HOME ════ */
+/* ════ ADMIN: TODAY ════ */
 function renderAdminHome(){
-  const today=dateStr(new Date());
-  const todayAppts=S.appointments.filter(a=>a.date===today);
-  const todayCancel=todayAppts.filter(a=>a.status==='cancelled').length;
-  document.getElementById('adm-stat-today').textContent=todayAppts.length;
-  document.getElementById('adm-stat-all').textContent=S.appointments.length;
-  document.getElementById('adm-stat-cancel').textContent=todayCancel;
-  document.getElementById('adm-stat-clients').textContent = S.profiles && S.profiles.length ? S.profiles.length : [...new Set(S.appointments.filter(a=>a.email).map(a=>a.email))].length;
-  // Availability bar
-  const bar=document.getElementById('avail-bar');
-  bar.innerHTML=DOCTORS.map(d=>{
-    const taken=S.appointments.filter(a=>a.departmentId===d.id&&a.date===today&&a.status!=='cancelled').map(a=>a.slot);
-    const free=SLOTS.filter(s=>!taken.includes(s)).length;
-    const slotsHtml=SLOTS.slice(0,6).map(s=>`<span class="avail-slot ${taken.includes(s)?'taken':''}">${s}</span>`).join('')+'…';
-    return`<div class="avail-card" onclick="showTab('admin-schedule')">
-      <h4>${d.name}</h4>
-      <p>${d.spec} &nbsp;·&nbsp; <strong>${free}/${SLOTS.length}</strong> slots free</p>
-      <div class="avail-mini-slots">${slotsHtml}</div>
+  const t=todayStr();
+  document.getElementById('adm-today-label').textContent=fmtDate(t);
+  const todays=S.appointments.filter(a=>a.date===t);
+  const live=sortAsc(todays.filter(a=>a.status!=='cancelled'));
+  document.getElementById('adm-stat-today').textContent=live.length;
+  document.getElementById('adm-stat-all').textContent=S.appointments.filter(isUpcoming).length;
+  document.getElementById('adm-stat-cancel').textContent=todays.filter(a=>a.status==='cancelled').length;
+  document.getElementById('adm-stat-clients').textContent=allClients().length;
+
+  const list=document.getElementById('adm-today-list');
+  list.innerHTML = live.length ? live.map(a=>{
+    const past=isSlotPastStrict(a.date,a.slot);
+    return `<div class="today-row ${past?'past':''}">
+      <div class="t">${esc(a.slot)}</div>
+      <div class="who"><b>${esc(a.name)}</b><span>${esc(deptById(a.departmentId).name)}${a.company?' · '+esc(a.company):''}${a.reason?' · '+esc(a.reason):''}</span></div>
+      ${rowActions(a,past)}
+    </div>`;
+  }).join('') : (isClosedDay(t) ? '<p class="hint">Closed today (weekend or public holiday).</p>' : '<p class="hint">No meetings booked today.</p>');
+
+  // Show today's free slots, or the next working day once today is over.
+  const dayOver = isClosedDay(t) || SLOTS.every(s=>isSlotPast(t,s));
+  const ad = dayOver ? nextOpenDay(addDays(t,1)) : t;
+  document.getElementById('avail-title').textContent = dayOver ? `Free slots · ${fmtDate(ad)}` : 'Free slots today';
+  document.getElementById('avail-bar').innerHTML = DOCTORS.map(d=>{
+    const taken=takenFor(d.id,ad);
+    const free=freeSlots(d.id,ad);
+    const pct=Math.round(taken.length/SLOTS.length*100);
+    return `<div class="avail-card" onclick="S.adminScheduleDoc=${d.id};document.getElementById('adm-date-picker').value='${ad}';showTab('admin-schedule')">
+      <h4>${esc(d.name)}</h4><p>${free.length} free · ${taken.length} booked</p>
+      <div class="meter"><i style="width:${pct}%"></i></div>
+      <div class="avail-mini-slots">${SLOTS.filter(s=>!isSlotPast(ad,s)).map(s=>`<span class="avail-slot ${taken.includes(s)?'taken':''}">${s}</span>`).join('')}</div>
     </div>`;
   }).join('');
 }
-
-/* ════ ADMIN SCHEDULE ════ */
-function setAdminDateToday(){
-  document.getElementById('adm-date-picker').value=dateStr(new Date());
-  S.adminScheduleDate=dateStr(new Date());
-  S.adminScheduleDoc=DOCTORS[0].id;
-  renderAdminScheduleForDate();
+function rowActions(a,past){
+  const dept=deptById(a.departmentId);
+  const msg=`Hi ${(a.name||'').split(' ')[0]}, this is ${BUSINESS.name}. Just confirming your meeting with ${dept.name} on ${fmtDate(a.date)} at ${a.slot}. Reply here if you need to change it. See you then!`;
+  const wa = a.phone ? `<a class="btn btn-wa btn-xs" href="${esc(waLink(a.phone,msg))}" target="_blank" rel="noopener" title="Send a WhatsApp reminder">WhatsApp</a>` : '';
+  const call = a.phone ? `<a class="btn btn-line btn-xs" href="tel:${esc(a.phone)}">Call</a>` : '';
+  const cancel = a.status!=='cancelled' && !past ? `<button class="btn btn-line btn-xs" onclick="adminCancelAppt('${esc(a.id)}')">Cancel</button>` : '';
+  return `<div class="acts appt-acts">${wa}${call}${cancel}</div>`;
 }
+function sourceChip(s){
+  const map={online:['chip-navy','Online'],phone:['chip-gold','Phone'],'walk-in':['chip-gold','Walk-in'],whatsapp:['chip-green','WhatsApp']};
+  const [c,l]=map[s]||map.online; return `<span class="chip ${c}">${l}</span>`;
+}
+function statusChip(a){
+  if (a.status==='cancelled') return '<span class="chip chip-red">Cancelled</span>';
+  if (!isUpcoming(a)) return '<span class="chip chip-grey">Done</span>';
+  return '<span class="chip chip-green">Confirmed</span>';
+}
+
+/* ════ ADMIN: SCHEDULE ════ */
+function setAdminDateToday(){ document.getElementById('adm-date-picker').value=todayStr(); renderAdminScheduleForDate(); }
+function shiftAdminDate(n){ const el=document.getElementById('adm-date-picker'); el.value=addDays(el.value||todayStr(),n); renderAdminScheduleForDate(); }
+function selectAdminScheduleDoc(id){ S.adminScheduleDoc=id; renderAdminScheduleForDate(); }
 function renderAdminScheduleForDate(){
-  const dateVal=document.getElementById('adm-date-picker').value||dateStr(new Date());
-  S.adminScheduleDate=dateVal;
-  // Doc tabs
-  document.getElementById('adm-doc-tabs').innerHTML=DOCTORS.map(d=>{
-    const cnt=S.appointments.filter(a=>a.departmentId===d.id&&a.date===dateVal&&a.status!=='cancelled').length;
-    return`<button class="adt ${d.id===S.adminScheduleDoc?'active':''}" onclick="selectAdminScheduleDoc(${d.id})">
-      ${d.name}<span class="day-count-badge">${cnt}</span>
-    </button>`;
+  const ds=document.getElementById('adm-date-picker').value||todayStr();
+  document.getElementById('adm-doc-tabs').innerHTML = DOCTORS.map(d=>{
+    const cnt=S.appointments.filter(a=>a.departmentId===d.id && a.date===ds && a.status!=='cancelled').length;
+    return `<button class="adt ${d.id===S.adminScheduleDoc?'active':''}" onclick="selectAdminScheduleDoc(${d.id})">${esc(d.name)}<span class="day-count-badge">${cnt}</span></button>`;
   }).join('');
-  renderAdminScheduleTable(dateVal,S.adminScheduleDoc);
-}
-function selectAdminScheduleDoc(id){
-  S.adminScheduleDoc=id;
-  renderAdminScheduleForDate();
-}
-function renderAdminScheduleTable(dateVal,docId){
-  const takenMap={};
-  S.appointments.filter(a=>a.departmentId===docId&&a.date===dateVal).forEach(a=>takenMap[a.slot]=a);
-  const now=new Date();
-  const todayStr=dateStr(now);
-  const isToday=(dateVal===todayStr);
-  const isPastDate=dateVal<todayStr;
-  const currentMins=now.getHours()*60+now.getMinutes();
-  let n=0;
-  document.getElementById('adm-schedule-body').innerHTML=SLOTS.map(t=>{
-    const a=takenMap[t];
-    // Check if this time slot has passed (for today) or date is past
-    let slotPast=isPastDate;
-    if(isToday&&!slotPast){const[h,m]=t.split(':').map(Number);if(h*60+m<=currentMins)slotPast=true;}
-    if(a){
-      n++;
-      const company=a.company||'—';
-      const isCancelled=a.status==='cancelled';
-      const rowStyle=isCancelled?'opacity:.5;background:rgba(220,50,50,.06);'
-                    :slotPast?'opacity:.55;background:rgba(0,0,0,.1);':'';
-      const srcBadge=a.source==='phone'
-        ?'<span class="chip chip-gold">&#128222; Phone</span>'
-        :'<span class="chip chip-navy">&#127760; Online</span>';
-      const statusBadge=isCancelled
-        ?'<span class="chip chip-red">Cancelled</span>'
-        :slotPast
-          ?'<span class="chip chip-gold">Completed</span>'
-          :'<span class="chip chip-green">Confirmed</span>';
-      const cancelBtn=!isCancelled&&!slotPast
-        ?`<button class="btn btn-danger btn-sm" onclick="adminCancelAppt('${a.id}')">Cancel</button>`
-        :'';
-      return`<tr style="${rowStyle}">
-        <td><span class="row-num">${n}</span></td>
-        <td><strong>${t}</strong></td>
-        <td>${a.name}</td>
-        <td>${a.phone}</td>
-        <td>${company}</td>
-        <td>${srcBadge}</td>
-        <td>${statusBadge}</td>
-        <td>${cancelBtn}</td>
-      </tr>`;
-    }
-    // Empty slot — grey out if past
-    const emptyStyle=slotPast?'opacity:.4;':'';
-    return`<tr style="${emptyStyle}"><td></td><td>${t}</td><td colspan="6" style="color:var(--muted2);font-size:.78rem">${slotPast?'— Passed —':'— Available —'}</td></tr>`;
+  const body=document.getElementById('adm-schedule-body');
+  if (isClosedDay(ds)){ body.innerHTML=`<tr class="free-row"><td colspan="8" class="center">${esc(fmtDate(ds))} is a weekend or public holiday.</td></tr>`; return; }
+  const rows=S.appointments.filter(a=>a.departmentId===S.adminScheduleDoc && a.date===ds);
+  body.innerHTML = SLOTS.map(t=>{
+    const here=rows.filter(a=>a.slot===t);
+    const live=here.find(a=>a.status!=='cancelled');
+    const past=isSlotPast(ds,t);
+    if (live) return bookingRow(live,t,past);
+    const cancelled=here.find(a=>a.status==='cancelled');
+    if (cancelled) return bookingRow(cancelled,t,past);
+    return `<tr class="free-row ${past?'row-past':''}"><td><b>${t}</b></td><td colspan="6">${past?'—':'Free'}</td><td>${past?'':`<div class="acts"><button class="btn btn-line btn-xs" onclick="openManualBooking(${S.adminScheduleDoc},'${ds}','${t}')">+ Book</button></div>`}</td></tr>`;
   }).join('');
+}
+function bookingRow(a,t,past){
+  return `<tr class="${a.status==='cancelled'?'row-cancelled':past?'row-past':''}">
+    <td><b>${esc(t)}</b></td><td>${esc(a.name)}</td><td>${esc(a.phone||'—')}</td><td>${esc(a.company||'—')}</td>
+    <td>${esc(a.reason||'—')}</td><td>${sourceChip(a.source)}</td><td>${statusChip(a)}</td><td>${rowActions(a,past)}</td></tr>`;
 }
 
-/* ════ ADMIN BOOKINGS ════ */
+/* ════ ADMIN: BOOKINGS ════ */
+function setBookRange(r){
+  S.bookRange=r;
+  document.querySelectorAll('#tab-admin-bookings [data-range]').forEach(b=>b.classList.toggle('active',b.dataset.range===r));
+  renderAdminBookings();
+}
 function renderAdminBookings(){
-  const filterDate=document.getElementById('adm-book-date').value;
-  const todayStr=dateStr(new Date());
-  let list;
-  if(filterDate){
-    // Specific date selected — show all bookings for that date
-    list=S.appointments.filter(a=>a.date===filterDate);
-  } else {
-    // No filter — only show today and future (hide all past dates)
-    list=S.appointments.filter(a=>a.date>=todayStr);
-  }
-  list=[...list].sort((a,b)=>a.date.localeCompare(b.date)||a.slot.localeCompare(b.slot));
-  document.getElementById('adm-bookings-body').innerHTML=list.map((a,i)=>{
-    const company=a.company||'—';
-    const isCancelled=a.status==='cancelled';
-    const rowStyle=isCancelled?'opacity:.5;background:rgba(220,50,50,.06);':'';
-    const srcBadge=a.source==='phone'
-      ?'<span class="chip chip-gold">&#128222; Phone</span>'
-      :'<span class="chip chip-navy">&#127760; Online</span>';
-    const statusBadge=isCancelled
-      ?'<span class="chip chip-red">Cancelled</span>'
-      :'<span class="chip chip-green">Confirmed</span>';
-    const cancelBtn=!isCancelled
-      ?`<button class="btn btn-danger btn-sm" onclick="adminCancelAppt('${a.id}')">Cancel</button>`
-      :'';
-    return`<tr style="${rowStyle}">
-      <td><span class="row-num">${i+1}</span></td>
-      <td>${fmtDate(a.date)}</td>
-      <td>${a.slot}</td>
-      <td>${a.departmentName}</td>
-      <td>${a.name}</td>
-      <td>${a.phone}</td>
-      <td>${company}</td>
-      <td>${srcBadge}</td>
-      <td>${statusBadge}</td>
-      <td>${cancelBtn}</td>
-    </tr>`;
-  }).join('')||'<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">No upcoming bookings found</td></tr>';
+  const q=(document.getElementById('adm-book-search').value||'').toLowerCase().trim();
+  const day=document.getElementById('adm-book-date').value;
+  const t=todayStr();
+  let list=S.appointments.slice();
+  if (day) list=list.filter(a=>a.date===day);
+  else if (S.bookRange==='upcoming') list=list.filter(a=>a.date>=t);
+  if (q) list=list.filter(a=>[a.name,a.phone,a.company,a.email,a.reason].join(' ').toLowerCase().includes(q));
+  list = (S.bookRange==='all' && !day) ? sortAsc(list).reverse() : sortAsc(list);
+  document.getElementById('adm-bookings-body').innerHTML = list.map(a=>{
+    const past=isSlotPastStrict(a.date,a.slot);
+    return `<tr class="${a.status==='cancelled'?'row-cancelled':past?'row-past':''}">
+      <td>${esc(fmtShort(a.date))}</td><td><b>${esc(a.slot)}</b></td><td>${esc(deptById(a.departmentId).name)}</td>
+      <td>${esc(a.name)}</td><td>${esc(a.phone||'—')}</td><td>${esc(a.company||'—')}</td>
+      <td>${sourceChip(a.source)}</td><td>${statusChip(a)}</td><td>${rowActions(a,past)}</td></tr>`;
+  }).join('') || `<tr class="free-row"><td colspan="9" class="center">No bookings found.</td></tr>`;
 }
 
-/* ════ ADMIN BOOKINGS — HISTORY ════ */
-function showAllBookingsIncPast(){
-  // Temporarily show ALL bookings including past ones
-  const todayStr=dateStr(new Date());
-  const list=[...S.appointments].sort((a,b)=>a.date.localeCompare(b.date)||a.slot.localeCompare(b.slot));
-  document.getElementById('adm-bookings-body').innerHTML=list.map((a,i)=>{
-    const company=a.company||'—';
-    const isPast=a.date<todayStr;
-    const isCancelled=a.status==='cancelled';
-    const rowStyle=isCancelled?'opacity:.5;background:rgba(220,50,50,.06);'
-                  :isPast?'opacity:.45;background:rgba(0,0,0,.12);':'';
-    const srcBadge=a.source==='phone'
-      ?'<span class="chip chip-gold">&#128222; Phone</span>'
-      :'<span class="chip chip-navy">&#127760; Online</span>';
-    const statusBadge=isCancelled
-      ?'<span class="chip chip-red">Cancelled</span>'
-      :isPast
-        ?'<span class="chip chip-gold">Completed</span>'
-        :'<span class="chip chip-green">Confirmed</span>';
-    const cancelBtn=!isCancelled&&!isPast
-      ?`<button class="btn btn-danger btn-sm" onclick="adminCancelAppt('${a.id}')">Cancel</button>`
-      :'';
-    return`<tr style="${rowStyle}">
-      <td><span class="row-num">${i+1}</span></td>
-      <td>${fmtDate(a.date)}</td>
-      <td>${a.slot}</td>
-      <td>${a.departmentName}</td>
-      <td>${a.name}</td>
-      <td>${a.phone}</td>
-      <td>${company}</td>
-      <td>${srcBadge}</td>
-      <td>${statusBadge}</td>
-      <td>${cancelBtn}</td>
-    </tr>`;
-  }).join('')||'<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">No bookings found</td></tr>';
+/* ════ ADMIN: CLIENTS ════ */
+function allClients(){
+  const map=new Map();
+  (S.profiles||[]).forEach(p=>{ if(p.email===ADMIN_EMAIL) return; map.set((p.email||p.id).toLowerCase(),{name:p.full_name||p.email,phone:p.phone,email:p.email,company:p.company,count:0}); });
+  S.appointments.forEach(a=>{
+    const key=(a.email||a.phone||a.name||'').toLowerCase(); if(!key) return;
+    if (!map.has(key)) map.set(key,{name:a.name,phone:a.phone,email:a.email,company:a.company,count:0});
+    const c=map.get(key); if(a.status!=='cancelled') c.count++;
+    if(!c.phone) c.phone=a.phone; if(!c.company) c.company=a.company;
+  });
+  return [...map.values()].sort((a,b)=>String(a.name).localeCompare(String(b.name)));
 }
-
-/* ════ ADMIN CLIENTS ════ */
 function renderAdminClients(){
-  // Merge registered profiles (from Supabase auth) with booking data
-  const profiles = S.profiles || [];
-  // Also collect any clients that appear only in bookings (e.g. phone bookings with no account)
-  const bookingEmails = [...new Set(S.appointments.filter(a=>a.email).map(a=>a.email))];
-  const profileEmails = profiles.map(p=>p.email);
-  // Emails in bookings but not in profiles (phone-in clients)
-  const extraEmails = bookingEmails.filter(em=>em && !profileEmails.includes(em));
-
-  let rows = '';
-
-  // Registered clients from profiles table
-  profiles.forEach(p=>{
-    const appts = S.appointments.filter(a=>a.email===p.email);
-    const sources = [...new Set(appts.map(x=>x.source))];
-    const srcBadges = appts.length
-      ? sources.map(s=>s==='phone'
-          ?'<span class="chip chip-gold">&#128222; Phone</span>'
-          :'<span class="chip chip-navy">&#127760; Online</span>').join(' ')
-      : '<span class="chip chip-navy">&#127760; Registered</span>';
-    rows += `<tr>
-      <td><strong>${p.full_name||p.email}</strong></td>
-      <td>${p.phone||'—'}</td>
-      <td>${p.email||'—'}</td>
-      <td>${p.company||'—'}</td>
-      <td>${srcBadges}</td>
-      <td>${appts.length}</td>
-    </tr>`;
-  });
-
-  // Phone-in clients not in profiles
-  extraEmails.forEach(em=>{
-    const appts = S.appointments.filter(a=>a.email===em);
-    const a = appts[0];
-    const sources = [...new Set(appts.map(x=>x.source))];
-    const srcBadges = sources.map(s=>s==='phone'
-      ?'<span class="chip chip-gold">&#128222; Phone</span>'
-      :'<span class="chip chip-navy">&#127760; Online</span>').join(' ');
-    rows += `<tr>
-      <td><strong>${a.name}</strong></td>
-      <td>${a.phone||'—'}</td>
-      <td>${em||'—'}</td>
-      <td>${a.company||'—'}</td>
-      <td>${srcBadges}</td>
-      <td>${appts.length}</td>
-    </tr>`;
-  });
-
-  document.getElementById('adm-clients-body').innerHTML =
-    rows || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">No clients yet</td></tr>';
+  const q=(document.getElementById('adm-client-search').value||'').toLowerCase().trim();
+  let list=allClients();
+  if (q) list=list.filter(c=>[c.name,c.phone,c.email,c.company].join(' ').toLowerCase().includes(q));
+  document.getElementById('adm-clients-body').innerHTML = list.map(c=>`<tr>
+    <td><b>${esc(c.name)}</b></td><td>${esc(c.phone||'—')}</td>
+    <td>${c.email?`<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>`:'—'}</td>
+    <td>${esc(c.company||'—')}</td><td>${c.count}</td>
+    <td><div class="acts">${c.phone?`<a class="btn btn-wa btn-xs" href="${esc(waLink(c.phone,'Hi '+String(c.name||'').split(' ')[0]+', '))}" target="_blank" rel="noopener">WhatsApp</a>`:''}</div></td></tr>`).join('')
+    || `<tr class="free-row"><td colspan="6" class="center">No clients yet.</td></tr>`;
 }
 
-// adminCancelAppt() → handled by supabase.js
-
-/* ════ ADMIN MANUAL BOOKING ════ */
-function initManualBookModal(){
-  const today=dateStr(new Date());
+/* ════ ADMIN: ADD A BOOKING ════ */
+function openManualBooking(deptId,ds,slot){
+  ['mb-name','mb-phone','mb-email','mb-company','mb-reason'].forEach(id=>document.getElementById(id).value='');
+  const mem=document.getElementById('mb-member');
+  mem.innerHTML=DOCTORS.map(d=>`<option value="${d.id}">${esc(d.name)} — ${esc(d.spec)}</option>`).join('');
+  mem.value=String(deptId||S.adminScheduleDoc||DOCTORS[0].id);
   const dateEl=document.getElementById('mb-date');
-  dateEl.value=today;
-  dateEl.min=today;
-  // Re-render slots when date or member changes
-  dateEl.onchange=renderManualSlots;
-  document.getElementById('mb-member').onchange=renderManualSlots;
-  renderManualSlots();
+  dateEl.min=todayStr();
+  dateEl.value=ds || nextOpenDay(todayStr());
+  dateEl.onchange=()=>renderManualSlots();
+  mem.onchange=()=>renderManualSlots();
+  document.getElementById('client-names').innerHTML=allClients().map(c=>`<option value="${esc(c.name)}">`).join('');
+  document.getElementById('mb-name').onchange=()=>{
+    const c=allClients().find(x=>x.name===document.getElementById('mb-name').value);
+    if (c){ if(c.phone) document.getElementById('mb-phone').value=c.phone; if(c.email) document.getElementById('mb-email').value=c.email; if(c.company) document.getElementById('mb-company').value=c.company; }
+  };
+  renderManualSlots(slot);
+  openModal('manual-book-modal');
 }
-
-function renderManualSlots(){
-  const dateVal=document.getElementById('mb-date').value||dateStr(new Date());
-  const memberId=parseInt(document.getElementById('mb-member').value)||0;
-  const todayStr=dateStr(new Date());
-  const isToday=dateVal===todayStr;
-  const now=new Date();
-  const currentMins=now.getHours()*60+now.getMinutes();
-  // Get taken slots for this member+date
-  const taken=S.appointments
-    .filter(a=>a.departmentId===memberId&&a.date===dateVal&&a.status!=='cancelled')
-    .map(a=>a.slot);
+function renderManualSlots(pick){
+  const ds=document.getElementById('mb-date').value, id=parseInt(document.getElementById('mb-member').value);
   const sel=document.getElementById('mb-slot');
+  if (!ds){ sel.innerHTML='<option value="">Pick a day first</option>'; return; }
+  if (isClosedDay(ds)){ sel.innerHTML='<option value="">Closed that day</option>'; return; }
+  const taken=takenFor(id,ds);
   sel.innerHTML=SLOTS.map(t=>{
-    const isTaken=taken.includes(t);
-    let isPast=false;
-    if(isToday){const[h,m]=t.split(':').map(Number);if(h*60+m<=currentMins)isPast=true;}
-    let label=t;
-    let disabled='';
-    let style='';
-    if(isTaken){label=t+' — Booked';disabled='disabled';style='color:#e55;';}
-    else if(isPast){label=t+' — Passed';disabled='disabled';style='color:#888;text-decoration:line-through;';}
-    return`<option value="${t}" ${disabled} style="${style}">${label}</option>`;
+    const off=taken.includes(t)||isSlotPast(ds,t);
+    return `<option value="${t}" ${off?'disabled':''}>${t}${taken.includes(t)?' — booked':isSlotPast(ds,t)?' — passed':''}</option>`;
   }).join('');
-  // Auto-select first available slot
-  const firstAvail=sel.querySelector('option:not([disabled])');
-  if(firstAvail) firstAvail.selected=true;
-}
-// doManualBooking() → handled by supabase.js
-
-/* ════ HAMBURGER / DRAWER ════ */
-function toggleDrawer(){
-  const btn=document.getElementById('hamburger-btn');
-  const drawer=document.getElementById('mobile-drawer');
-  btn.classList.toggle('open');
-  drawer.classList.toggle('open');
-}
-function drawerNav(tab){
-  // close drawer
-  document.getElementById('hamburger-btn').classList.remove('open');
-  document.getElementById('mobile-drawer').classList.remove('open');
-  // update active drawer links
-  document.querySelectorAll('.mobile-drawer a').forEach(a=>a.classList.remove('active'));
-  showTab(tab);
-}
-// Close drawer when clicking outside
-document.addEventListener('click',function(e){
-  const drawer=document.getElementById('mobile-drawer');
-  const btn=document.getElementById('hamburger-btn');
-  if(drawer&&btn&&!drawer.contains(e.target)&&!btn.contains(e.target)){
-    drawer.classList.remove('open');
-    btn.classList.remove('open');
-  }
-});
-
-/* ════ UTILS ════ */
-function dateStr(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
-function fmtDate(ds){const[y,m,d]=ds.split('-');return`${parseInt(d)} ${MONTHS[parseInt(m)-1]} ${y}`;}
-
-/* ════ GOOGLE CALENDAR HELPER ════ */
-function buildGoogleCalendarUrl(booking) {
-  // Parse date and slot e.g. "2026-05-15" and "09:00"
-  const [y, mo, d] = booking.date.split('-').map(Number);
-  const [h, min]   = booking.slot.split(':').map(Number);
-
-  // Start datetime
-  const start = new Date(y, mo - 1, d, h, min, 0);
-  // End datetime — 30 minutes later
-  const end   = new Date(start.getTime() + 30 * 60 * 1000);
-
-  function toGCal(dt) {
-    const pad = n => String(n).padStart(2, '0');
-    return `${dt.getFullYear()}${pad(dt.getMonth()+1)}${pad(dt.getDate())}T${pad(dt.getHours())}${pad(dt.getMinutes())}00`;
-  }
-
-  const title   = encodeURIComponent('Meeting with Tidal Tech Solutions');
-  const details = encodeURIComponent(
-    `Department: ${booking.department_name || booking.departmentName}\n` +
-    `Time: ${booking.slot}\n` +
-    `Reason: ${booking.reason || 'General visit'}\n\n` +
-    `📍 Durban, KwaZulu-Natal\n📞 +27 81 518 9577`
-  );
-  const location = encodeURIComponent('Durban, KwaZulu-Natal, South Africa');
-  const dates    = `${toGCal(start)}/${toGCal(end)}`;
-
-  return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${title}&dates=${dates}&details=${details}&location=${location}&trp=false&sprop=&sprop=name:`;
+  const target = pick && !sel.querySelector(`option[value="${pick}"]`).disabled ? pick : (sel.querySelector('option:not([disabled])')||{}).value;
+  if (target) sel.value=target; else sel.innerHTML='<option value="">No free times</option>';
 }
 
-function showCalendarPrompt(booking) {
-  // Remove any existing prompt
-  const existing = document.getElementById('gcal-prompt');
-  if (existing) existing.remove();
-
-  const url = buildGoogleCalendarUrl(booking);
-  const div = document.createElement('div');
-  div.id = 'gcal-prompt';
-  div.style.cssText = `
-    position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
-    background:linear-gradient(135deg,#0d2137,#1a3a55);
-    border:1px solid var(--gold);border-radius:16px;
-    padding:20px 24px;z-index:9999;max-width:360px;width:90%;
-    box-shadow:0 8px 32px rgba(0,0,0,0.5);text-align:center;
-  `;
-  div.innerHTML = `
-    <div style="font-size:2rem;margin-bottom:8px">📅</div>
-    <h4 style="color:var(--gold);margin-bottom:6px;font-size:1rem">Booking Confirmed!</h4>
-    <p style="color:rgba(255,255,255,0.8);font-size:.85rem;margin-bottom:16px">
-      Add this appointment to your Google Calendar with a <strong style="color:#fff">1-hour reminder</strong> so you never miss it.
-    </p>
-    <a href="${url}" target="_blank" rel="noopener"
-       onclick="setTimeout(()=>{const el=document.getElementById('gcal-prompt');if(el)el.remove();},1000)"
-       style="display:inline-block;background:#4285F4;color:#fff;padding:10px 20px;
-              border-radius:8px;text-decoration:none;font-weight:600;font-size:.9rem;
-              margin-bottom:10px;width:100%;box-sizing:border-box">
-      <svg width="16" height="16" viewBox="0 0 18 18" style="vertical-align:middle;margin-right:6px">
-        <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z" fill="#fff"/>
-        <path d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z" fill="#fff"/>
-        <path d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z" fill="#fff"/>
-        <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z" fill="#fff"/>
-      </svg>
-      Add to Google Calendar
-    </a>
-    <br>
-    <button onclick="document.getElementById('gcal-prompt').remove()"
-            style="background:transparent;border:none;color:rgba(255,255,255,0.5);
-                   font-size:.8rem;cursor:pointer;padding:4px 8px">
-      No thanks
-    </button>
-  `;
-  document.body.appendChild(div);
-  // Auto-dismiss after 30 seconds
-  setTimeout(() => { const el = document.getElementById('gcal-prompt'); if (el) el.remove(); }, 30000);
+/* ════ CALENDAR LINKS ════ */
+function apptStartEnd(a){
+  const [y,mo,d]=a.date.split('-').map(Number), [h,mi]=a.slot.split(':').map(Number);
+  const start=new Date(y,mo-1,d,h,mi,0), end=new Date(start.getTime()+BUSINESS.meetingMinutes*60000);
+  return {start,end};
 }
-function toast(msg,type='info'){
-  const t=document.createElement('div');
-  t.className=`toast ${type}`;
-  const icon=type==='success'?'✓':type==='error'?'✕':type==='warn'?'⚠':'ℹ';
-  t.innerHTML=`<span>${icon}</span> ${msg}`;
-  document.getElementById('toasts').appendChild(t);
-  setTimeout(()=>t.remove(),4800);
+function calStamp(dt){ const p=n=>String(n).padStart(2,'0'); return `${dt.getFullYear()}${p(dt.getMonth()+1)}${p(dt.getDate())}T${p(dt.getHours())}${p(dt.getMinutes())}00`; }
+function buildGoogleCalendarUrl(a){
+  const {start,end}=apptStartEnd(a), dept=deptById(a.departmentId||a.department_id);
+  const details=`Meeting with ${dept.name} (${dept.spec})\n${a.reason?'About: '+a.reason+'\n':''}\n${BUSINESS.location}\n${BUSINESS.phone}`;
+  return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent('Meeting with '+BUSINESS.name)}&dates=${calStamp(start)}/${calStamp(end)}&ctz=Africa/Johannesburg&details=${encodeURIComponent(details)}&location=${encodeURIComponent(BUSINESS.location)}`;
 }
-function togglePw(id,btn){
-  const el=document.getElementById(id);
-  const show=el.type==='password';
-  el.type=show?'text':'password';
-  btn.textContent=show?'\uD83D\uDE48':'\uD83D\uDC41';
+// Calendar file with a 1-hour reminder. Times are written in UTC (South Africa is UTC+2 all year).
+function icsStamp(dt){ return dt.toISOString().replace(/[-:]/g,'').replace(/\.\d{3}/,''); }
+function apptStartEndUTC(a){
+  const [y,mo,d]=a.date.split('-').map(Number), [h,mi]=a.slot.split(':').map(Number);
+  const start=new Date(Date.UTC(y,mo-1,d,h-2,mi,0));   // SAST = UTC+2
+  return { start, end:new Date(start.getTime()+BUSINESS.meetingMinutes*60000) };
 }
-
-/* manifest fetch removed */
+function downloadICS(a){
+  const {start,end}=apptStartEndUTC(a), dept=deptById(a.departmentId||a.department_id);
+  const ics=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Tidal Tech Solutions//Appointly//EN','CALSCALE:GREGORIAN','METHOD:PUBLISH','BEGIN:VEVENT',
+    `UID:${a.id||Date.now()}@appointly.tidaltech`,`DTSTAMP:${icsStamp(new Date())}`,
+    `DTSTART:${icsStamp(start)}`,`DTEND:${icsStamp(end)}`,
+    `SUMMARY:Meeting with ${BUSINESS.name}`,`DESCRIPTION:With ${dept.name}. Questions? Call or WhatsApp ${BUSINESS.phone}`,`LOCATION:${BUSINESS.location.replace(/,/g,'\\,')}`,
+    'BEGIN:VALARM','TRIGGER:-PT1H','ACTION:DISPLAY','DESCRIPTION:Your meeting with Tidal Tech Solutions starts in 1 hour','END:VALARM','END:VEVENT','END:VCALENDAR'].join('\r\n');
+  const url=URL.createObjectURL(new Blob([ics],{type:'text/calendar;charset=utf-8'}));
+  const link=document.createElement('a'); link.href=url; link.download='tidal-tech-meeting.ics';
+  document.body.appendChild(link); link.click(); link.remove(); setTimeout(()=>URL.revokeObjectURL(url),4000);
+}
+function showSuccess(a,emailNote){
+  const dept=deptById(a.departmentId);
+  document.getElementById('success-details').innerHTML=`<b>With</b> ${esc(dept.name)}<br><b>Day</b> ${esc(fmtDate(a.date))}<br><b>Time</b> ${esc(a.slot)} (${BUSINESS.meetingMinutes} min)`;
+  document.getElementById('success-email-note').textContent=emailNote||'';
+  document.getElementById('success-gcal').href=buildGoogleCalendarUrl(a);
+  document.getElementById('success-ics').onclick=()=>downloadICS(a);
+  openModal('success-modal');
+}

@@ -1,700 +1,479 @@
 /* ═══════════════════════════════════════════════════════════════
-   supabase.js  —  Tidal Tech Solutions · Appointly
+   supabase.js — Tidal Tech Solutions · Appointly
+   Sign-in, bookings, profiles and emails (Supabase backend)
    ═══════════════════════════════════════════════════════════════ */
 
-// ── 1. YOUR KEYS ────────────────────────────────────────────────
-const SUPABASE_URL      = 'https://gitptdhmojjoiednwglw.supabase.co';
-const SUPABASE_ANON     = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdpdHB0ZGhtb2pqb2llZG53Z2x3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNzQ1OTYsImV4cCI6MjA5Mjk1MDU5Nn0.PO-ODy7AkmtgWZYRi9NDJqcqoIuOJa6cjHPawUIuhSc';
-const RECAPTCHA_KEY     = '6LdDxtgsAAAAAMbD4ywQDLqliV5iikCqKyqUphfA';
-const SEND_EMAIL_FN     = `${SUPABASE_URL}/functions/v1/send-email`;
-const SITE_URL          = window.location.origin + window.location.pathname;
-
-// ────────────────────────────────────────────────────────────────
+// ── 1. YOUR KEYS (the anon key is public by design; never put the service key here) ──
+const SUPABASE_URL  = 'https://gitptdhmojjoiednwglw.supabase.co';
+const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdpdHB0ZGhtb2pqb2llZG53Z2x3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNzQ1OTYsImV4cCI6MjA5Mjk1MDU5Nn0.PO-ODy7AkmtgWZYRi9NDJqcqoIuOJa6cjHPawUIuhSc';
+const SEND_EMAIL_FN = `${SUPABASE_URL}/functions/v1/send-email`;
+const SITE_URL      = window.location.origin + window.location.pathname.replace(/index\.html$/,'');
+const ADMIN_EMAIL   = 'melissanell1234@gmail.com';   // the staff login; must match your RLS policies
 
 const _supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
-/* ── Loading overlay helpers ── */
+/* ═══════════════ SESSION HANDLING ═══════════════ */
+let _entering = false;
 
+_supa.auth.onAuthStateChange((event, session) => {
+  // Supabase recommends not awaiting other calls inside this callback, so defer.
+  setTimeout(() => {
+    if (event === 'PASSWORD_RECOVERY') { openModal('new-pw-modal'); return; }
+    if ((event === 'INITIAL_SESSION' || event === 'SIGNED_IN') && session) handleSession(session);
+    if (event === 'SIGNED_OUT') resetToLanding();
+  }, 0);
+});
 
-
-/* ═══════════════════════════════════════════════════════════════
-   REAL-TIME SUBSCRIPTION — keeps admin portal live
-   ═══════════════════════════════════════════════════════════════ */
-let _realtimeChannel = null;
-
-function _startRealtimeBookings() {
-  if (_realtimeChannel) return; // already subscribed
-  _realtimeChannel = _supa
-    .channel('public:bookings')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' },
-      async function(payload) {
-        console.log('[Realtime] Booking event:', payload.eventType, payload.new);
-        // Re-fetch all bookings to keep state consistent
-        await loadBookings();
-        // Refresh whichever admin view is currently active
-        if (S.userType === 'admin') {
-          renderAdminHome();
-          renderAdminScheduleForDate();
-          renderAdminBookings();
-          renderAdminClients();
-        }
-        if (S.userType === 'client') {
-          renderDashboard();
-          renderMyAppointments();
-          renderSlots();
-        }
-        // Show live notifications
-        if (S.userType === 'admin') {
-          const b = payload.new;
-          if (payload.eventType === 'INSERT') {
-            toast('🔔 New booking: ' + (b.name || '') + ' — ' + (b.department_name || '') + ' at ' + (b.slot || ''), 'info');
-          } else if (payload.eventType === 'UPDATE' && b.status === 'cancelled') {
-            toast('❌ Cancelled: ' + (b.name || '') + ' — ' + (b.department_name || '') + ' at ' + (b.slot || ''), 'warn');
-          }
-        }
-      }
-    )
-    .subscribe();
-}
-
-let _adminBookingPoll = null;
-
-function _stopRealtimeBookings() {
-  if (_realtimeChannel) {
-    _supa.removeChannel(_realtimeChannel);
-    _realtimeChannel = null;
+async function handleSession(session){
+  const u = session.user;
+  if (_entering || (S.user && S.user.id === u.id)) return;   // already inside
+  _entering = true;
+  document.getElementById('toasts').innerHTML='';
+  loading(true, 'Signing you in…');
+  try {
+    if ((u.email||'').toLowerCase() === ADMIN_EMAIL) {
+      S.user = { id:u.id, name:'Melissa', email:u.email };
+      S.profile = await _getProfile(u.id);
+      await Promise.all([loadBookings(), loadProfiles()]);
+      closeModal('admin-login-modal');
+      enterAdminApp();
+      _startRealtime(); _startAdminPolling(); _startActivityListeners(); _resetInactivityTimer();
+      toast('Welcome back, Melissa 👋', 'success');
+    } else {
+      const p = await _ensureProfile(u);
+      S.profile = p;
+      S.user = { id:u.id, name:p.full_name || u.email, email:u.email, phone:p.phone || '', company:p.company || '' };
+      await Promise.all([loadBookings(), refreshTaken()]);
+      enterClientApp();
+      _startRealtime();
+    }
+    if (location.hash.includes('access_token') || location.search.includes('code=')) history.replaceState(null, '', location.pathname);
+  } catch (e) {
+    console.error(e);
+    toast('We could not load your account: ' + friendlyError(e), 'error');
+  } finally {
+    loading(false); _entering = false;
   }
 }
 
-function _startAdminPolling() {
-  if (_adminBookingPoll) return;
-  _adminBookingPoll = setInterval(async () => {
-    if (S.userType !== 'admin') return;
-    await loadBookings();
-    renderAdminHome();
-    renderAdminScheduleForDate();
-    renderAdminBookings();
-    renderAdminClients();
-  }, 8000);
+function resetToLanding(){
+  _stopRealtime(); _stopAdminPolling(); _stopActivityListeners();
+  S.user=null; S.userType='client'; S.profile=null;
+  S.appointments=[]; S.profiles=[]; S.taken=[];
+  S.selDepartment=null; S.selDate=null; S.selSlot=null;
+  document.querySelectorAll('.modal-overlay.open').forEach(m=>m.classList.remove('open'));
+  ['li-pass','rg-pass','adm-pass'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+  showScreen('landing');
 }
 
-function _stopAdminPolling() {
-  if (_adminBookingPoll) {
-    clearInterval(_adminBookingPoll);
-    _adminBookingPoll = null;
+/* ═══════════════ PROFILES ═══════════════ */
+async function _getProfile(id){
+  const { data } = await _supa.from('profiles').select('*').eq('id', id).maybeSingle();
+  return data || null;
+}
+// Create the profile on first sign-in; never overwrite details the client has edited since.
+async function _ensureProfile(user){
+  const existing = await _getProfile(user.id);
+  const meta = user.user_metadata || {};
+  if (existing) {
+    if (!existing.avatar_url && meta.avatar_url) {
+      await _supa.from('profiles').update({ avatar_url:meta.avatar_url, updated_at:new Date().toISOString() }).eq('id', user.id);
+      existing.avatar_url = meta.avatar_url;
+    }
+    return existing;
   }
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   REAL-TIME SUBSCRIPTION — profiles (clients tab)
-   ═══════════════════════════════════════════════════════════════ */
-let _realtimeProfilesChannel = null;
-
-function _startRealtimeProfiles() {
-  if (_realtimeProfilesChannel) return;
-  _realtimeProfilesChannel = _supa
-    .channel('public:profiles')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' },
-      async function() {
-        await loadProfiles();
-        if (S.userType === 'admin') {
-          renderAdminClients();
-          const el = document.getElementById('adm-stat-clients');
-          if (el) el.textContent = S.profiles ? S.profiles.length : 0;
-        }
-      }
-    )
-    .subscribe();
-}
-
-function _stopRealtimeProfiles() {
-  if (_realtimeProfilesChannel) {
-    _supa.removeChannel(_realtimeProfilesChannel);
-    _realtimeProfilesChannel = null;
-  }
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   INACTIVITY TIMER — auto-logout after 30 minutes of no activity
-   ═══════════════════════════════════════════════════════════════ */
-const INACTIVITY_LIMIT = 30 * 60 * 1000;
-const WARNING_BEFORE   = 60 * 1000;
-let _inactivityTimer;
-let _warningTimer;
-
-function _resetInactivityTimer() {
-  if (!S.user) return;
-  clearTimeout(_inactivityTimer);
-  clearTimeout(_warningTimer);
-  _warningTimer = setTimeout(() => {
-    if (!S.user) return;
-    toast('⚠ You will be logged out in 1 minute due to inactivity.', 'warn');
-  }, INACTIVITY_LIMIT - WARNING_BEFORE);
-  _inactivityTimer = setTimeout(async () => {
-    if (!S.user) return;
-    toast('You have been logged out due to 30 minutes of inactivity.', 'warn');
-    await logout();
-  }, INACTIVITY_LIMIT);
-}
-
-function _startActivityListeners() {
-  ['mousemove','mousedown','keydown','touchstart','scroll','click'].forEach(evt => {
-    document.addEventListener(evt, _resetInactivityTimer, { passive: true });
-  });
-}
-
-function _stopActivityListeners() {
-  ['mousemove','mousedown','keydown','touchstart','scroll','click'].forEach(evt => {
-    document.removeEventListener(evt, _resetInactivityTimer);
-  });
-  clearTimeout(_inactivityTimer);
-  clearTimeout(_warningTimer);
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   HELPER — upsert profile row (Google OAuth + email/password)
-   ═══════════════════════════════════════════════════════════════ */
-async function _upsertProfile(user, extra) {
-  extra = extra || {};
   const profile = {
-    id         : user.id,
-    email      : user.email,
-    full_name  : user.user_metadata && user.user_metadata.full_name  ? user.user_metadata.full_name  : (extra.full_name  || user.email),
-    phone      : user.user_metadata && user.user_metadata.phone      ? user.user_metadata.phone      : (extra.phone      || ''),
-    company    : user.user_metadata && user.user_metadata.company    ? user.user_metadata.company    : (extra.company    || ''),
-    avatar_url : user.user_metadata && user.user_metadata.avatar_url ? user.user_metadata.avatar_url : '',
-    provider   : user.app_metadata  && user.app_metadata.provider    ? user.app_metadata.provider    : 'email',
-    updated_at : new Date().toISOString(),
+    id: user.id, email: user.email,
+    full_name : meta.full_name || meta.name || user.email,
+    phone     : meta.phone || '',
+    company   : meta.company || '',
+    avatar_url: meta.avatar_url || '',
+    provider  : (user.app_metadata && user.app_metadata.provider) || 'email',
+    updated_at: new Date().toISOString(),
   };
-  const { error } = await _supa.from('profiles').upsert(profile, { onConflict: 'id' });
-  if (error) console.error('Profile upsert error:', error.message);
+  const { error } = await _supa.from('profiles').upsert(profile, { onConflict:'id' });
+  if (error) console.error('Profile create error:', error.message);
   return profile;
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   AUTH STATE LISTENER
-   ═══════════════════════════════════════════════════════════════ */
-_supa.auth.onAuthStateChange(async function(event, session) {
-  if (event === 'SIGNED_IN' && session) {
-    const u = session.user;
-    // If admin is already logged in, don't override with client view
-    if (S.userType === 'admin') return;
-    const profile = await _upsertProfile(u);
-    await loadBookings();
-    loginClient({
-      name    : profile.full_name || profile.email,
-      email   : profile.email,
-      phone   : profile.phone,
-      company : profile.company,
-    });
-    _startActivityListeners();
-    _resetInactivityTimer();
-    _startRealtimeBookings();
-    if (window.location.hash.indexOf('access_token') !== -1) {
-      history.replaceState(null, '', window.location.pathname);
+async function loadProfiles(){
+  const { data, error } = await _supa.from('profiles').select('*').order('full_name', { ascending:true });
+  if (error) { console.error('loadProfiles:', error.message); return; }
+  S.profiles = data || [];
+}
+
+/* ═══════════════ BOOKINGS ═══════════════ */
+function _mapBooking(b){
+  return {
+    id:b.id, departmentId:Number(b.department_id), departmentName:b.department_name,
+    date:String(b.date).slice(0,10), slot:String(b.slot).slice(0,5),
+    name:b.name||'', phone:b.phone||'', email:b.email||'', company:b.company||'',
+    reason:b.reason||'', source:b.source||'online', status:b.status||'confirmed', user_id:b.user_id||null,
+  };
+}
+async function loadBookings(){
+  const { data, error } = await _supa.from('bookings').select('*').order('date', { ascending:true });
+  if (error) { console.error('loadBookings:', error); toast('Could not load bookings. Please refresh.', 'error'); return; }
+  S.appointments = (data || []).map(_mapBooking);
+}
+
+// Which slots are taken by anyone (no names or phone numbers). Uses the
+// get_taken_slots database function from setup.sql when it exists.
+async function refreshTaken(){
+  if (S.userType === 'admin') return;
+  const from = todayStr();
+  const rpc = await _supa.rpc('get_taken_slots', { from_date: from });
+  if (!rpc.error && rpc.data) { S.taken = (Array.isArray(rpc.data) ? rpc.data : []).map(t=>({ department_id:t.department_id, date:String(t.date).slice(0,10), slot:String(t.slot).slice(0,5) })); return; }
+  const { data, error } = await _supa.from('bookings').select('department_id,date,slot,status').gte('date', from).neq('status','cancelled');
+  if (!error) S.taken = (data || []).map(t=>({ department_id:t.department_id, date:String(t.date).slice(0,10), slot:String(t.slot).slice(0,5) }));
+}
+
+function _isDuplicate(error){ return error && (error.code === '23505' || /duplicate key/i.test(error.message||'')); }
+
+/* ── Client: make a booking ── */
+async function confirmBooking(){
+  if (!S.selDepartment || !S.selDate || !S.selSlot) { toast('Choose who, a day and a time first.', 'warn'); return; }
+  const name  = document.getElementById('bk-name').value.trim();
+  const phone = document.getElementById('bk-phone').value.trim();
+  if (!name)  { toast('Please add your full name.', 'error'); document.getElementById('bk-name').focus(); return; }
+  if (!validPhone(phone)) { toast('Please add a valid phone number, e.g. 082 123 4567.', 'error'); document.getElementById('bk-phone').focus(); return; }
+
+  busy('btn-book', true);
+  try {
+    await refreshTaken();
+    if (!freeSlots(S.selDepartment.id, S.selDate).includes(S.selSlot)) {
+      toast('Sorry, that time was just taken. Please pick another.', 'warn');
+      S.selSlot = null; renderCalendar(); renderSlots(); return;
     }
-  }
-  if (event === 'SIGNED_OUT') {
-    _stopActivityListeners();
-    _stopRealtimeBookings();
-    _stopRealtimeProfiles();
-    S.user     = null;
-    S.userType = 'client';
-    showScreen('landing');
-  }
-});
+    const booking = {
+      department_id: S.selDepartment.id, department_name: S.selDepartment.name,
+      date: S.selDate, slot: S.selSlot, name, phone, email: S.user.email,
+      company: document.getElementById('bk-id').value.trim(),
+      reason : document.getElementById('bk-reason').value.trim(),
+      source : 'online', status: 'confirmed', user_id: S.user.id,
+    };
+    const { data, error } = await _supa.from('bookings').insert(booking).select().single();
+    if (_isDuplicate(error)) { toast('Sorry, that time was just taken. Please pick another.', 'warn'); S.selSlot=null; await refreshTaken(); renderSlots(); return; }
+    if (error) { toast('Booking failed: ' + friendlyError(error), 'error'); return; }
 
-/* ═══════════════════════════════════════════════════════════════
-   PAGE LOAD — restore existing session
-   ═══════════════════════════════════════════════════════════════ */
-window.addEventListener('load', async function() {
-  const result = await _supa.auth.getSession();
-  const session = result.data.session;
-  if (session) {
-    const u = session.user;
-    // Restore admin session if this is the admin email
-    if (u.email === ADMIN_EMAIL) {
-      await loadBookings();
-      await loadProfiles();
-      S.user     = { name: 'Melissa', email: ADMIN_EMAIL };
-      S.userType = 'admin';
-      document.getElementById('client-nav').classList.add('hidden');
-      document.getElementById('admin-nav').classList.remove('hidden');
-      document.getElementById('top-avatar').textContent = 'M';
-      document.getElementById('drawer-client').style.display = 'none';
-      document.getElementById('drawer-admin').style.display  = 'block';
-      showScreen('app');
-      renderAdminHome();
-      showTab('admin-home');
-      _startRealtimeBookings();
-      _startRealtimeProfiles();
-      _startAdminPolling();
-      _startActivityListeners();
-      _resetInactivityTimer();
-      return;
+    const appt = _mapBooking(data);
+    S.appointments.push(appt);
+    S.taken.push({ department_id:appt.departmentId, date:appt.date, slot:appt.slot });
+
+    // Save phone/company to the profile if they were empty, so next time is quicker.
+    if ((!S.user.phone && phone) || (!S.user.company && booking.company)) {
+      S.user.phone = S.user.phone || phone; S.user.company = S.user.company || booking.company;
+      _supa.from('profiles').update({ phone:S.user.phone, company:S.user.company, updated_at:new Date().toISOString() }).eq('id', S.user.id);
     }
-    const profile = await _upsertProfile(u);
-    await loadBookings();
-    loginClient({
-      name    : profile.full_name || profile.email,
-      email   : profile.email,
-      phone   : profile.phone,
-      company : profile.company,
-    });
-    _startActivityListeners();
-    _resetInactivityTimer();
-    _startRealtimeBookings();
-    if (window.location.hash.indexOf('access_token') !== -1) {
-      history.replaceState(null, '', window.location.pathname);
+
+    let note = '';
+    if (document.getElementById('notif-email').checked) {
+      const sent = await sendBookingEmail(appt, 'booking');
+      note = sent ? `A confirmation email is on its way to ${S.user.email}.` : '';
     }
-  }
-});
+    showSuccess(appt, note);
+    resetBookingSelection(); renderCalendar(); renderSlots(); renderDashboard();
+  } finally { busy('btn-book', false); }
+}
 
-window.addEventListener('focus', async function() {
-  if (S.userType === 'admin') {
-    await loadBookings();
-    renderAdminHome();
-    renderAdminScheduleForDate();
-    renderAdminBookings();
-    renderAdminClients();
-  }
-});
+/* ── Client: cancel ── */
+async function clientCancel(id){
+  const a = S.appointments.find(x=>String(x.id)===String(id)); if (!a) return;
+  const ok = await confirmDialog('Cancel this meeting?', `${fmtDate(a.date)} at ${a.slot} with ${deptById(a.departmentId).name}.`, 'Yes, cancel it');
+  if (!ok) return;
+  loading(true, 'Cancelling…');
+  const { error } = await _supa.from('bookings').update({ status:'cancelled' }).eq('id', a.id);
+  loading(false);
+  if (error) { toast('Could not cancel: ' + friendlyError(error), 'error'); return; }
+  a.status = 'cancelled';
+  S.taken = S.taken.filter(t=>!(Number(t.department_id)===a.departmentId && t.date===a.date && t.slot===a.slot));
+  sendBookingEmail(a, 'cancel');
+  toast('Your meeting has been cancelled.', 'success');
+  renderMyAppointments(); renderDashboard();
+}
 
+/* ── Client or admin: move a booking ── */
+async function doReschedule(){
+  const a = S.appointments.find(x=>String(x.id)===String(S.rescheduleId));
+  const ds = document.getElementById('rsch-date').value, slot = S.rschSlot;
+  if (!a || !ds || !slot) { toast('Pick a new day and time.', 'warn'); return; }
+  busy('btn-rsch', true);
+  try {
+    await refreshTaken();
+    if (!freeSlots(a.departmentId, ds, a.id).includes(slot)) { toast('That time was just taken. Please pick another.', 'warn'); S.rschSlot=null; renderRescheduleSlots(); return; }
+    const { error } = await _supa.from('bookings').update({ date:ds, slot, status:'confirmed' }).eq('id', a.id);
+    if (_isDuplicate(error)) { toast('That time was just taken. Please pick another.', 'warn'); S.rschSlot=null; await refreshTaken(); renderRescheduleSlots(); return; }
+    if (error) { toast('Could not move it: ' + friendlyError(error), 'error'); return; }
+    S.taken = S.taken.filter(t=>!(Number(t.department_id)===a.departmentId && t.date===a.date && t.slot===a.slot));
+    a.date = ds; a.slot = slot; a.status = 'confirmed';
+    S.taken.push({ department_id:a.departmentId, date:ds, slot });
+    closeModal('reschedule-modal');
+    sendBookingEmail(a, 'reschedule');
+    toast(`Moved to ${fmtDate(ds)} at ${slot} ✓`, 'success');
+    renderMyAppointments(); renderDashboard();
+  } finally { busy('btn-rsch', false); }
+}
 
+/* ── Admin: cancel ── */
+async function adminCancelAppt(id){
+  const a = S.appointments.find(x=>String(x.id)===String(id)); if (!a) return;
+  const ok = await confirmDialog(`Cancel ${a.name}'s meeting?`, `${fmtDate(a.date)} at ${a.slot} with ${deptById(a.departmentId).name}.${a.email?' They will get a cancellation email.':''}`, 'Yes, cancel it');
+  if (!ok) return;
+  const { error } = await _supa.from('bookings').update({ status:'cancelled' }).eq('id', a.id);
+  if (error) { toast('Cancel failed: ' + friendlyError(error), 'error'); return; }
+  a.status = 'cancelled';
+  if (a.email) sendBookingEmail(a, 'cancel');
+  toast(`${a.name}'s meeting was cancelled.`, 'success');
+  _renderAdminAll();
+}
 
-/* ═══════════════════════════════════════════════════════════════
-   REGISTER
-   ═══════════════════════════════════════════════════════════════ */
-async function doRegister() {
-  const first    = document.getElementById('rg-first').value.trim();
-  const last     = document.getElementById('rg-last').value.trim();
-  const email    = document.getElementById('rg-email').value.trim();
-  const phone    = document.getElementById('rg-phone').value.trim();
-  const company  = document.getElementById('rg-company').value.trim();
+/* ── Admin: add a booking (phone, walk-in, WhatsApp) ── */
+async function doManualBooking(){
+  const name  = document.getElementById('mb-name').value.trim();
+  const phone = document.getElementById('mb-phone').value.trim();
+  const email = document.getElementById('mb-email').value.trim();
+  const deptId= parseInt(document.getElementById('mb-member').value);
+  const ds    = document.getElementById('mb-date').value;
+  const slot  = document.getElementById('mb-slot').value;
+  if (!name) { toast('Add the client\'s name.', 'error'); return; }
+  if (!validPhone(phone)) { toast('Add a valid phone number.', 'error'); return; }
+  if (email && !validEmail(email)) { toast('That email address doesn\'t look right.', 'error'); return; }
+  if (!ds || isClosedDay(ds)) { toast('Choose a weekday that isn\'t a public holiday.', 'error'); return; }
+  if (!slot) { toast('No free time on that day. Choose another day.', 'error'); return; }
+  if (takenFor(deptId, ds).includes(slot)) { toast('That time is already booked.', 'error'); return; }
+
+  busy('btn-manual', true);
+  try {
+    const dept = deptById(deptId);
+    const booking = {
+      department_id:deptId, department_name:dept.name, date:ds, slot, name, phone, email,
+      company: document.getElementById('mb-company').value.trim(),
+      reason : document.getElementById('mb-reason').value.trim(),
+      source : document.getElementById('mb-source').value, status:'confirmed',
+    };
+    const { data, error } = await _supa.from('bookings').insert(booking).select().single();
+    if (_isDuplicate(error)) { toast('That time was just booked by someone else.', 'warn'); await loadBookings(); renderManualSlots(); return; }
+    if (error) { toast('Could not save: ' + friendlyError(error), 'error'); return; }
+    const appt = _mapBooking(data);
+    S.appointments.push(appt);
+    if (email && document.getElementById('mb-send-email').checked) sendBookingEmail(appt, 'booking');
+    closeModal('manual-book-modal');
+    toast(`Booked ${name} with ${dept.name} on ${fmtShort(ds)} at ${slot} ✓`, 'success');
+    _renderAdminAll();
+  } finally { busy('btn-manual', false); }
+}
+
+/* ═══════════════ PROFILE ═══════════════ */
+async function saveProfile(){
+  const first = document.getElementById('pf-first').value.trim();
+  const last  = document.getElementById('pf-last').value.trim();
+  const phone = document.getElementById('pf-phone').value.trim();
+  const company = document.getElementById('pf-id').value.trim();
+  if (!first) { toast('Please add your first name.', 'error'); return; }
+  if (phone && !validPhone(phone)) { toast('That phone number doesn\'t look right.', 'error'); return; }
+  busy('btn-profile', true);
+  const full_name = (first + ' ' + last).trim();
+  const { error } = await _supa.from('profiles').update({ full_name, phone, company, updated_at:new Date().toISOString() }).eq('id', S.user.id);
+  await _supa.auth.updateUser({ data:{ full_name, phone, company } });
+  busy('btn-profile', false);
+  if (error) { toast('Could not save: ' + friendlyError(error), 'error'); return; }
+  Object.assign(S.user, { name:full_name, phone, company });
+  if (S.profile) Object.assign(S.profile, { full_name, phone, company });
+  prefillClientForms(); setAvatar(); renderDashboard();
+  toast('Profile saved ✓', 'success');
+}
+
+async function handlePicUpload(e){
+  const file = e.target.files[0]; e.target.value='';
+  if (!file) return;
+  if (!/^image\//.test(file.type)) { toast('Please choose a photo.', 'error'); return; }
+  if (file.size > 5*1024*1024) { toast('That photo is too big. Please use one under 5 MB.', 'error'); return; }
+  loading(true, 'Uploading photo…');
+  try {
+    const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
+    const path = `${S.user.id}.${ext}`;
+    const up = await _supa.storage.from('avatars').upload(path, file, { upsert:true, contentType:file.type });
+    if (up.error) { toast('Could not upload your photo. Please try again later.', 'error'); return; }
+    const url = _supa.storage.from('avatars').getPublicUrl(path).data.publicUrl + '?t=' + Date.now();
+    await _supa.from('profiles').update({ avatar_url:url, updated_at:new Date().toISOString() }).eq('id', S.user.id);
+    S.profile = Object.assign(S.profile || {}, { avatar_url:url });
+    prefillClientForms(); setAvatar();
+    toast('Photo updated ✓', 'success');
+  } finally { loading(false); }
+}
+
+/* ═══════════════ SIGN IN / REGISTER ═══════════════ */
+async function doRegister(){
+  const first = document.getElementById('rg-first').value.trim();
+  const last  = document.getElementById('rg-last').value.trim();
+  const email = document.getElementById('rg-email').value.trim();
+  const phone = document.getElementById('rg-phone').value.trim();
+  const company = document.getElementById('rg-company').value.trim();
   const password = document.getElementById('rg-pass').value;
+  if (!first) { toast('Please add your first name.', 'error'); return; }
+  if (!validEmail(email)) { toast('Please add a valid email address.', 'error'); return; }
+  if (!validPhone(phone)) { toast('Please add a valid phone number, e.g. 082 123 4567.', 'error'); return; }
+  if (password.length < 8) { toast('Your password needs at least 8 characters.', 'error'); return; }
 
-  if (!first || !email || !phone || !password) {
-    toast('Please fill in all required fields', 'error');
-    return;
-  }
-
-  const result = await _supa.auth.signUp({
-    email    : email,
-    password : password,
-    options  : { data: { full_name: first + ' ' + last, phone: phone, company: company } },
+  busy('btn-register', true);
+  const { data, error } = await _supa.auth.signUp({
+    email, password,
+    options:{ emailRedirectTo:SITE_URL, data:{ full_name:(first+' '+last).trim(), phone, company } },
   });
-
-  if (result.error) { toast(result.error.message, 'error'); return; }
-
-  if (result.data.user) {
-    await _upsertProfile(result.data.user, { full_name: first + ' ' + last, phone: phone, company: company });
+  busy('btn-register', false);
+  if (error) { toast(friendlyError(error), 'error'); return; }
+  if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+    toast('This email already has an account. Sign in instead.', 'warn'); switchAuthTab('login');
+    document.getElementById('li-email').value = email; return;
   }
-
-  toast('Account created! Check your email to confirm ✓', 'success');
+  if (!data.session) {
+    switchAuthTab('login');
+    document.getElementById('li-email').value = email;
+    toast('Almost done! Open the email we sent you and tap the link to confirm, then sign in.', 'success');
+  }
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   SIGN IN (email + password)
-   ═══════════════════════════════════════════════════════════════ */
-async function doLogin() {
-  const email    = document.getElementById('li-email').value.trim();
+async function doLogin(){
+  const email = document.getElementById('li-email').value.trim();
   const password = document.getElementById('li-pass').value;
-
-  if (!email || !password) { toast('Please enter your email and password', 'error'); return; }
-
-  // Login uses Supabase rate limiting — no captcha needed here
-
-  const result = await _supa.auth.signInWithPassword({ email: email, password: password });
-  if (result.error) { toast(result.error.message, 'error'); return; }
+  if (!email || !password) { toast('Enter your email and password.', 'error'); return; }
+  busy('btn-login', true);
+  const { error } = await _supa.auth.signInWithPassword({ email, password });
+  busy('btn-login', false);
+  if (error) toast(friendlyError(error), 'error');
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   GOOGLE OAUTH
-   ═══════════════════════════════════════════════════════════════ */
-async function googleLogin() {
-  const result = await _supa.auth.signInWithOAuth({
-    provider : 'google',
-    options  : { redirectTo: SITE_URL },
-  });
-  if (result.error) toast(result.error.message, 'error');
+async function googleLogin(){
+  const { error } = await _supa.auth.signInWithOAuth({ provider:'google', options:{ redirectTo:SITE_URL } });
+  if (error) toast(friendlyError(error), 'error');
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   FORGOT PASSWORD
-   ═══════════════════════════════════════════════════════════════ */
-async function doForgotPasswordSubmit() {
+async function doAdminLogin(){
+  const email = document.getElementById('adm-email').value.trim();
+  const password = document.getElementById('adm-pass').value;
+  if (!email || !password) { toast('Enter your email and password.', 'error'); return; }
+  busy('btn-admin-login', true);
+  const { error } = await _supa.auth.signInWithPassword({ email, password });
+  busy('btn-admin-login', false);
+  if (error) { toast(friendlyError(error), 'error'); return; }
+  closeModal('admin-login-modal');
+}
+
+async function doForgotPasswordSubmit(){
   const email = document.getElementById('forgot-pw-email').value.trim();
-  if (!email) { toast('Please enter your email address', 'error'); return; }
-
-  const result = await _supa.auth.resetPasswordForEmail(email, {
-    redirectTo: SITE_URL + '?reset=true',
-  });
-
-  if (result.error) { toast(result.error.message, 'error'); return; }
-
+  if (!validEmail(email)) { toast('Please enter a valid email address.', 'error'); return; }
+  busy('btn-forgot', true);
+  const { error } = await _supa.auth.resetPasswordForEmail(email, { redirectTo:SITE_URL });
+  busy('btn-forgot', false);
+  if (error) { toast(friendlyError(error), 'error'); return; }
   document.getElementById('forgot-pw-sent-email').textContent = email;
   document.getElementById('forgot-pw-form').classList.add('hidden');
   document.getElementById('forgot-pw-sent').classList.remove('hidden');
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   LOGOUT
-   ═══════════════════════════════════════════════════════════════ */
-async function logout() {
+async function doSetNewPassword(){
+  const password = document.getElementById('new-pw').value;
+  if (password.length < 8) { toast('Use at least 8 characters.', 'error'); return; }
+  busy('btn-new-pw', true);
+  const { error } = await _supa.auth.updateUser({ password });
+  busy('btn-new-pw', false);
+  if (error) { toast(friendlyError(error), 'error'); return; }
+  closeModal('new-pw-modal');
+  toast('Password changed ✓ You\'re signed in.', 'success');
+}
+
+async function logout(){
+  try { await _supa.auth.signOut(); } catch(e) { console.error(e); }
+  resetToLanding();
+}
+
+/* ═══════════════ EMAILS (Supabase edge function "send-email") ═══════════════ */
+function _buildEmailHTML(appt, type){
+  const dept = deptById(appt.departmentId);
+  const heading = type==='cancel' ? 'Your meeting is cancelled' : type==='reschedule' ? 'Your meeting has moved' : 'Your meeting is confirmed';
+  return `<p>Hi ${esc((appt.name||'').split(' ')[0])},</p><p>${heading}.</p><p><b>With:</b> ${esc(dept.name)}<br><b>Day:</b> ${esc(fmtDate(appt.date))}<br><b>Time:</b> ${esc(appt.slot)}</p><p>Questions? Call or WhatsApp ${esc(BUSINESS.phone)}.</p><p>Kind regards,<br>${esc(BUSINESS.name)}</p>`;
+}
+async function sendBookingEmail(appt, type){
+  if (!appt.email) return false;
   try {
-    _stopActivityListeners();
-    _stopRealtimeBookings();
-    _stopRealtimeProfiles();
-    _stopAdminPolling();
-    await _supa.auth.signOut();
-  } catch(e) {
-    console.error('Logout error:', e.message);
-  }
-  // Always clear state and go to landing regardless of errors
-  S.user          = null;
-  S.userType      = 'client';
-  S.selDepartment = null;
-  S.selDate       = null;
-  S.selSlot       = null;
-  S.appointments  = [];
-  S.profiles      = [];
-  showScreen('landing');
-}
-
-
-/* ═══════════════════════════════════════════════════════════════
-   PROFILE PHOTO — upload to Supabase Storage (bucket: avatars)
-   ═══════════════════════════════════════════════════════════════ */
-async function uploadProfilePhoto(file) {
-  const userResult = await _supa.auth.getUser();
-  const user = userResult.data.user;
-  if (!user) { toast('Please sign in first', 'error'); return null; }
-  const ext  = file.name.split('.').pop().toLowerCase();
-  const path = `${user.id}.${ext}`;
-  const { error: upErr } = await _supa.storage
-    .from('avatars')
-    .upload(path, file, { upsert: true, contentType: file.type });
-  if (upErr) {
-    console.warn('Storage upload error:', upErr.message);
-    toast('Could not save photo to server — showing locally only', 'warn');
-    return null;
-  }
-  const { data } = _supa.storage.from('avatars').getPublicUrl(path);
-  const publicUrl = data.publicUrl + '?t=' + Date.now();
-  await _supa.from('profiles')
-    .update({ avatar_url: publicUrl, updated_at: new Date().toISOString() })
-    .eq('id', user.id);
-  if (S.user) S.user.avatar_url = publicUrl;
-  return publicUrl;
-}
-
-async function handlePicUploadSupabase(file) {
-  const reader = new FileReader();
-  reader.onload = ev => {
-    const src = ev.target.result;
-    const circle = `<img src="${src}" style="width:100%;height:100%;object-fit:cover;border-radius:50%"/>`;
-    document.getElementById('prof-pic-el').innerHTML = circle;
-    document.getElementById('top-avatar').innerHTML  = circle;
-  };
-  reader.readAsDataURL(file);
-  const url = await uploadProfilePhoto(file);
-  if (url) {
-    const circle = `<img src="${url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%"/>`;
-    document.getElementById('prof-pic-el').innerHTML = circle;
-    document.getElementById('top-avatar').innerHTML  = circle;
-    toast('Profile photo saved ✓', 'success');
-  }
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   EMAIL — send via Resend edge function
-   ═══════════════════════════════════════════════════════════════ */
-function _buildEmailHTML(appt, type) {
-  const date = fmtDate(appt.date);
-  const dept = appt.departmentName || appt.department_name || '';
-  let heading, body;
-  if (type === 'cancel') {
-    heading = 'Appointment Cancelled';
-    body = `<p>Dear ${appt.name},</p>
-      <p>Your appointment on <strong>${date}</strong> at <strong>${appt.slot}</strong>
-      with <strong>${dept}</strong> has been <strong style="color:#cc0000">cancelled</strong>.</p>
-      <p>To rebook please visit our portal or call <strong>+27 81 518 9577</strong>.</p>`;
-  } else if (type === 'reschedule') {
-    heading = 'Appointment Rescheduled';
-    body = `<p>Dear ${appt.name},</p>
-      <p>Your appointment has been <strong>rescheduled</strong> to
-      <strong>${date}</strong> at <strong>${appt.slot}</strong>
-      with <strong>${dept}</strong>.</p>`;
-  } else {
-    heading = 'Appointment Confirmed ✓';
-    body = `<p>Dear ${appt.name},</p>
-      <p>Your appointment is <strong style="color:#1a7a4a">confirmed</strong>.</p>
-      <table style="border-collapse:collapse;margin:12px 0">
-        <tr><td style="padding:4px 12px 4px 0;color:#555;font-size:14px">Department</td><td style="padding:4px 0;font-weight:500">${dept}</td></tr>
-        <tr><td style="padding:4px 12px 4px 0;color:#555;font-size:14px">Date</td><td style="padding:4px 0;font-weight:500">${date}</td></tr>
-        <tr><td style="padding:4px 12px 4px 0;color:#555;font-size:14px">Time</td><td style="padding:4px 0;font-weight:500">${appt.slot}</td></tr>
-      </table>
-      <p style="font-size:13px;color:#666">Questions? Call <strong>+27 81 518 9577</strong> or reply to this email.</p>`;
-  }
-  return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f4f4f4;font-family:Arial,sans-serif">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f4;padding:24px 0">
-    <tr><td align="center">
-      <table width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden">
-        <tr><td style="background:#0d2137;padding:24px 32px;text-align:center">
-          <h1 style="margin:0;color:#fff;font-size:22px">Tidal Tech Solutions</h1>
-          <p style="margin:4px 0 0;color:#e8821a;font-size:14px">Powered by Appointly</p>
-        </td></tr>
-        <tr><td style="padding:28px 32px">
-          <h2 style="margin:0 0 16px;color:#0d2137;font-size:18px">${heading}</h2>
-          ${body}
-          <p style="margin-top:24px;color:#333">Kind regards,<br><strong>Tidal Tech Solutions</strong></p>
-        </td></tr>
-        <tr><td style="background:#f0f0f0;padding:14px 32px;text-align:center">
-          <p style="margin:0;font-size:12px;color:#999">Durban, KwaZulu-Natal · tidaltech.co.za · +27 81 518 9577</p>
-        </td></tr>
-      </table>
-    </td></tr>
-  </table></body></html>`;
-}
-
-async function _sendBookingEmail(appt, type) {
-  const to = appt.email || (S.user && S.user.email);
-  if (!to) { console.log('[Email] No recipient address found'); return; }
-  const subjects = {
-    booking    : 'Appointment Confirmed — Tidal Tech Solutions',
-    cancel     : 'Appointment Cancelled — Tidal Tech Solutions',
-    reschedule : 'Appointment Rescheduled — Tidal Tech Solutions',
-  };
-  try {
+    const { data } = await _supa.auth.getSession();
+    const token = data.session ? data.session.access_token : SUPABASE_ANON;
+    const subjects = { booking:'Meeting confirmed', cancel:'Meeting cancelled', reschedule:'Meeting moved' };
     const res = await fetch(SEND_EMAIL_FN, {
-      method  : 'POST',
-      headers : {
-        'Content-Type'  : 'application/json',
-        'Authorization' : `Bearer ${SUPABASE_ANON}`,
-      },
-      body: JSON.stringify({
-        to      : to,
-        subject : subjects[type] || subjects.booking,
-        html    : _buildEmailHTML(appt, type),
-      }),
+      method:'POST',
+      headers:{ 'Content-Type':'application/json', 'Authorization':`Bearer ${token}`, 'apikey':SUPABASE_ANON },
+      // booking_id + type are used by the new secure function; to/subject/html keep the old one working.
+      body: JSON.stringify({ booking_id:appt.id, type, to:appt.email, subject:`${subjects[type]||subjects.booking} — ${BUSINESS.name}`, html:_buildEmailHTML(appt, type) }),
     });
-    if (!res.ok) console.warn('[Email] Send failed:', await res.text());
-  } catch(e) {
-    console.log('[Email] Edge function not deployed yet — would send to:', to);
-  }
+    if (!res.ok) { console.warn('[Email] failed:', await res.text()); return false; }
+    return true;
+  } catch(e) { console.warn('[Email] not sent:', e.message); return false; }
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   SAVE BOOKING (client portal)
-   ═══════════════════════════════════════════════════════════════ */
-async function confirmBooking() {
-  if (!S.selDepartment) { toast('Please select a department', 'error'); return; }
-  if (!S.selDate)       { toast('Please select a date', 'error'); return; }
-  if (!S.selSlot)       { toast('Please select a time slot', 'error'); return; }
+/* ═══════════════ LIVE UPDATES ═══════════════ */
+let _channel = null, _poll = null, _takenPoll = null;
 
-  const name  = document.getElementById('bk-name').value.trim();
-  const phone = document.getElementById('bk-phone').value.trim();
-  if (!name || !phone) { toast('Please fill in your name and phone number', 'error'); return; }
-
-  const booking = {
-    department_id   : S.selDepartment.id,
-    department_name : S.selDepartment.name,
-    date            : S.selDate,
-    slot            : S.selSlot,
-    name            : name,
-    phone           : phone,
-    email           : S.user.email,
-    company         : document.getElementById('bk-id').value,
-    reason          : document.getElementById('bk-reason').value,
-    source          : 'online',
-    status          : 'confirmed',
-  };
-
-  const userResult = await _supa.auth.getUser();
-  if (userResult.data.user) booking.user_id = userResult.data.user.id;
-
-  const result = await _supa.from('bookings').insert(booking).select().single();
-  if (result.error) { toast('Booking failed: ' + result.error.message, 'error'); return; }
-
-  S.appointments.push(Object.assign({}, booking, { id: result.data.id }));
-
-  const emailOn = document.getElementById('notif-email').checked;
-  const waOn    = document.getElementById('notif-wa').checked;
-  if (emailOn) {
-    _sendBookingEmail(Object.assign({}, booking, { departmentName: S.selDepartment.name }), 'booking');
-    showEmailPreview(Object.assign({}, booking, { departmentName: S.selDepartment.name }), 'booking');
-  }
-  if (waOn) toast('💬 WhatsApp confirmation sent to ' + phone, 'info');
-  toast('Appointment confirmed! ✓', 'success');
-  // Show Google Calendar prompt
-  if (typeof showCalendarPrompt === 'function') {
-    setTimeout(function() { showCalendarPrompt(booking); }, 1800);
-  }
-
-  S.selSlot = null;
-  renderSlots();
-  renderDashboard();
-  renderDepartments();
-  setTimeout(function() { showTab('my-appts'); }, 1600);
+function _renderAdminAll(){
+  if (S.userType !== 'admin') return;
+  const active = document.querySelector('.tab-panel.active');
+  const id = active ? active.id.replace('tab-','') : 'admin-home';
+  renderAdminHome();
+  if (id==='admin-schedule') renderAdminScheduleForDate();
+  if (id==='admin-bookings') renderAdminBookings();
+  if (id==='admin-clients') renderAdminClients();
+}
+function _renderClientAll(){
+  if (S.userType !== 'client') return;
+  const active = document.querySelector('.tab-panel.active');
+  const id = active ? active.id.replace('tab-','') : 'dashboard';
+  if (id==='dashboard') renderDashboard();
+  if (id==='my-appts') renderMyAppointments();
+  if (id==='book') { renderCalendar(); renderSlots(); }
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   LOAD BOOKINGS FROM SUPABASE
-   ═══════════════════════════════════════════════════════════════ */
-async function loadBookings() {
-  const result = await _supa.from('bookings').select('*').order('date', { ascending: false });
-  console.log('[loadBookings] Result:', result);
-  if (result.error) { 
-    console.error('loadBookings ERROR:', result.error.message, result.error.code, result.error.details);
-    toast('Could not load bookings: ' + result.error.message, 'error');
-    return;
-  }
-  console.log('[loadBookings] Raw data:', result.data);
-  if (!result.data || !result.data.length) { 
-    console.log('[loadBookings] No data found, setting appointments to []');
-    S.appointments = []; 
-    return;
-  }
-  S.appointments = result.data.map(function(b) {
-    return {
-      id             : b.id,
-      departmentId   : b.department_id,
-      departmentName : b.department_name,
-      date           : b.date,
-      slot           : b.slot,
-      name           : b.name,
-      phone          : b.phone,
-      email          : b.email,
-      company        : b.company || '',
-      reason         : b.reason || '',
-      source         : b.source || 'online',
-      status         : b.status || 'confirmed',
-      user_id        : b.user_id || null,
-    };
-  });
-  console.log('[loadBookings] Mapped appointments:', S.appointments);
+function _startRealtime(){
+  if (_channel) return;
+  _channel = _supa.channel('bookings-live')
+    .on('postgres_changes', { event:'*', schema:'public', table:'bookings' }, async payload => {
+      await loadBookings();
+      if (S.userType === 'admin') {
+        if (S.profiles) await loadProfiles();
+        _renderAdminAll();
+        const b = payload.new || {};
+        if (payload.eventType === 'INSERT' && b.source === 'online') toast(`🔔 New booking: ${b.name} · ${fmtShort(String(b.date))} ${String(b.slot).slice(0,5)}`, 'info');
+        if (payload.eventType === 'UPDATE' && b.status === 'cancelled') toast(`Cancelled: ${b.name} · ${fmtShort(String(b.date))} ${String(b.slot).slice(0,5)}`, 'warn');
+      } else { await refreshTaken(); _renderClientAll(); }
+    })
+    .subscribe();
+  // Keep a client's view of free times fresh while they book.
+  _takenPoll = setInterval(async () => {
+    if (S.userType==='client' && document.getElementById('tab-book').classList.contains('active') && !document.hidden) { await refreshTaken(); renderCalendar(); renderSlots(); }
+  }, 30000);
 }
-
-/* ═══════════════════════════════════════════════════════════════
-   LOAD ALL CLIENT PROFILES FROM SUPABASE (admin use)
-   ═══════════════════════════════════════════════════════════════ */
-async function loadProfiles() {
-  const result = await _supa.from('profiles').select('*').order('full_name', { ascending: true });
-  if (result.error) { console.error('loadProfiles:', result.error.message); return; }
-  S.profiles = result.data || [];
+function _stopRealtime(){
+  if (_channel) { _supa.removeChannel(_channel); _channel = null; }
+  clearInterval(_takenPoll); _takenPoll = null;
 }
+function _startAdminPolling(){
+  if (_poll) return;
+  _poll = setInterval(async () => { if (S.userType==='admin' && !document.hidden) { await loadBookings(); _renderAdminAll(); } }, 20000);
+}
+function _stopAdminPolling(){ clearInterval(_poll); _poll = null; }
 
-/* ═══════════════════════════════════════════════════════════════
-   ADMIN LOGIN — signs into Supabase so RLS policy passes
-   ═══════════════════════════════════════════════════════════════ */
-const ADMIN_EMAIL = 'melissanell1234@gmail.com'; // must match your RLS policy email
-
-async function doAdminLogin() {
-  const pass = document.getElementById('adm-pass').value;
-  if (!pass) { toast('Please enter your password', 'error'); return; }
-
-  toast('Signing in...', 'info');
-
-  // Sign in to Supabase so the JWT is set and RLS policy passes
-  const { data, error } = await _supa.auth.signInWithPassword({
-    email    : ADMIN_EMAIL,
-    password : pass,
-  });
-
-  if (error) { toast('Login failed: ' + error.message, 'error'); return; }
-
-  // Check the email matches the admin
-  if (data.user.email !== ADMIN_EMAIL) {
-    await _supa.auth.signOut();
-    toast('Unauthorised', 'error');
-    return;
-  }
-
-
-  // Now authenticated — RLS policy will allow full access
+window.addEventListener('focus', async () => {
+  if (!S.user) return;
   await loadBookings();
-  await loadProfiles();
+  if (S.userType==='admin') _renderAdminAll(); else { await refreshTaken(); _renderClientAll(); }
+});
 
-  S.user     = { name: 'Melissa', email: ADMIN_EMAIL };
-  S.userType = 'admin';
-
-  closeModal('admin-login-modal');
-  document.getElementById('client-nav').classList.add('hidden');
-  document.getElementById('admin-nav').classList.remove('hidden');
-  document.getElementById('top-avatar').textContent = 'M';
-  document.getElementById('drawer-client').style.display = 'none';
-  document.getElementById('drawer-admin').style.display  = 'block';
-  showScreen('app');
-  renderAdminHome();
-  showTab('admin-home');
-
-  // Start live subscriptions and polling so admin sees updates instantly
-  _startRealtimeBookings();
-  _startRealtimeProfiles();
-  _startAdminPolling();
-  _startActivityListeners();
-  _resetInactivityTimer();
-
-  toast('Welcome back, Melissa 👋', 'success');
+/* ═══════════════ STAFF AUTO-LOGOUT AFTER 30 MIN IDLE ═══════════════ */
+const INACTIVITY_LIMIT = 30*60*1000, WARNING_BEFORE = 60*1000;
+let _idleTimer, _warnTimer;
+function _resetInactivityTimer(){
+  if (S.userType !== 'admin') return;
+  clearTimeout(_idleTimer); clearTimeout(_warnTimer);
+  _warnTimer = setTimeout(()=>toast('You\'ll be logged out in 1 minute because you\'ve been inactive.', 'warn'), INACTIVITY_LIMIT-WARNING_BEFORE);
+  _idleTimer = setTimeout(async ()=>{ toast('Logged out after 30 minutes of inactivity.', 'warn'); await logout(); }, INACTIVITY_LIMIT);
 }
-
-/* ═══════════════════════════════════════════════════════════════
-   SAVE MANUAL BOOKING (admin portal)
-   ═══════════════════════════════════════════════════════════════ */
-async function doManualBooking() {
-  const name    = document.getElementById('mb-name').value.trim();
-  const phone   = document.getElementById('mb-phone').value.trim();
-  const docId   = parseInt(document.getElementById('mb-member').value);
-  const dateVal = document.getElementById('mb-date').value;
-  const slot    = document.getElementById('mb-slot').value;
-
-  if (!name || !phone || !docId || !dateVal) {
-    toast('Please fill in all required fields', 'error');
-    return;
-  }
-
-  const doc = DOCTORS.find(function(d) { return d.id === docId; });
-  const booking = {
-    department_id   : docId,
-    department_name : doc.name,
-    date            : dateVal,
-    slot            : slot,
-    name            : name,
-    phone           : phone,
-    email           : document.getElementById('mb-email').value,
-    company         : '',
-    reason          : document.getElementById('mb-reason').value,
-    source          : 'phone',
-    status          : 'confirmed',
-  };
-
-  const result = await _supa.from('bookings').insert(booking).select().single();
-  if (result.error) { toast('Booking failed: ' + result.error.message, 'error'); return; }
-
-  S.appointments.push(Object.assign({}, booking, { id: result.data.id, departmentId: docId, departmentName: doc.name }));
-  closeModal('manual-book-modal');
-  toast('Booking saved for ' + name + ' with ' + doc.name + ' on ' + fmtDate(dateVal) + ' at ' + slot + ' ✓', 'success');
-  renderAdminHome();
-  renderAdminBookings();
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   ADMIN CANCEL APPOINTMENT
-   ═══════════════════════════════════════════════════════════════ */
-async function adminCancelAppt(id) {
-  if (!confirm('Cancel this appointment? This cannot be undone.')) return;
-
-  const result = await _supa.from('bookings')
-    .update({ status: 'cancelled' })
-    .eq('id', id);
-
-  if (result.error) { toast('Cancel failed: ' + result.error.message, 'error'); return; }
-
-  const appt = S.appointments.find(function(a) { return a.id === id; });
-  if (appt) appt.status = 'cancelled';
-
-  toast('Appointment for ' + (appt ? appt.name : '') + ' has been cancelled.', 'warn');
-  renderAdminHome();
-  renderAdminScheduleForDate();
-  renderAdminBookings();
-}
+function _startActivityListeners(){ ['mousedown','keydown','touchstart','scroll'].forEach(ev=>document.addEventListener(ev, _resetInactivityTimer, { passive:true })); }
+function _stopActivityListeners(){ ['mousedown','keydown','touchstart','scroll'].forEach(ev=>document.removeEventListener(ev, _resetInactivityTimer)); clearTimeout(_idleTimer); clearTimeout(_warnTimer); }
